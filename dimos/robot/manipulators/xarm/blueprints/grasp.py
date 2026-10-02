@@ -16,6 +16,7 @@
 
 ``dimos run xarm-grasp --xarm7-ip 192.168.1.x``   heuristic grasps
 ``dimos run xarm-grasp-graspgenx --xarm7-ip ...`` learned grasps
+``dimos run xarm-grasp-keyboard --xarm7-ip ...``  heuristic grasps + keyboard jog
 ``dimos run xarm-grasp --simulation mujoco``      the same stack in MuJoCo
 
 Only the grasp provider separates the two blueprints. The arm-versus-sim split is
@@ -43,7 +44,11 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.perception.experimental.object_scene_registration import ObjectSceneRegistrationModule
-from dimos.robot.manipulators.common.blueprints import coordinator, trajectory_task
+from dimos.robot.manipulators.common.blueprints import (
+    coordinator,
+    eef_twist_task,
+    trajectory_task,
+)
 from dimos.robot.manipulators.xarm.config import (
     XARM7_COLLISION_LINKS,
     make_xarm7_model_config,
@@ -53,6 +58,7 @@ from dimos.robot.manipulators.xarm.config import (
     xarm7_hardware,
 )
 from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
+from dimos.teleop.keyboard.keyboard_teleop_module import KeyboardTeleopModule
 from dimos.utils.data import LfsPath
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 
@@ -229,9 +235,10 @@ _REMAPPINGS = [
     (ManipulationModule, "voxel_map", "global_map"),
 ]
 
-# Everything but the grasp provider. Exactly one provider may be composed in:
-# PickAndPlaceModule resolves its generator by spec, so two would be ambiguous.
-_XARM_GRASP_MODULES = (
+# Everything but the coordinator and the grasp provider. Exactly one provider
+# may be composed in: PickAndPlaceModule resolves its generator by spec, so two
+# would be ambiguous.
+_XARM_GRASP_STACK = (
     ManipulationModule.blueprint(
         model=_model,
         static_transforms=[] if SIMULATED else [XARM_WRIST_CAMERA_TRANSFORM],
@@ -246,23 +253,55 @@ _XARM_GRASP_MODULES = (
     _scene_registration(),
     *_voxel_mapping(),
     RerunBridgeModule.blueprint(),
-    coordinator(
-        hardware=[_hardware],
-        tasks=[
-            trajectory_task(_hardware),
-            TaskConfig(
-                name="arm_gripper",
-                type="gripper",
-                joint_names=["arm/gripper"],
-                priority=20,
-            ),
-        ],
+)
+
+_XARM_GRASP_TASKS = (
+    trajectory_task(_hardware),
+    TaskConfig(
+        name="arm_gripper",
+        type="gripper",
+        joint_names=["arm/gripper"],
+        priority=20,
     ),
+)
+
+_XARM_GRASP_MODULES = (
+    *_XARM_GRASP_STACK,
+    coordinator(hardware=[_hardware], tasks=list(_XARM_GRASP_TASKS)),
 )
 
 xarm_grasp = autoconnect(*_XARM_GRASP_MODULES, HeuristicGraspModule.blueprint()).remappings(
     _REMAPPINGS
 )
+
+# The twist task holds its last pose and keeps commanding whenever it is idle, so
+# it must rank below the trajectory task (priority 10): a running pick wins every
+# arm joint for the length of the rollout, and the keyboard owns the arm again,
+# from wherever the planner stopped, as soon as the trajectory finishes. Ranking
+# it above would preempt every planned motion.
+XARM_GRASP_TELEOP_PRIORITY = 5
+
+xarm_grasp_keyboard = autoconnect(
+    *_XARM_GRASP_STACK,
+    coordinator(
+        hardware=[_hardware],
+        tasks=[
+            *_XARM_GRASP_TASKS,
+            eef_twist_task(
+                _hardware,
+                # Arm joints only: the IK must not claim the gripper joint.
+                robot_model=make_xarm7_model_config(add_gripper=False),
+                target_frame="link7",
+                priority=XARM_GRASP_TELEOP_PRIORITY,
+                # The keyboard publishes a zero twist on key release, so no
+                # command timeout is needed to stop the arm.
+                timeout=0.0,
+            ),
+        ],
+    ),
+    KeyboardTeleopModule.blueprint(),
+    HeuristicGraspModule.blueprint(),
+).remappings(_REMAPPINGS)
 
 xarm_grasp_graspgenx = autoconnect(
     *_XARM_GRASP_MODULES,
