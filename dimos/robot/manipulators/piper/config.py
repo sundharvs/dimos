@@ -116,6 +116,7 @@ def piper_hardware(
     mock_without_address: bool = True,
     home_joints: list[float] | None = None,
     canonical_joint_names: list[str] | None = None,
+    judge_can: bool = True,
 ) -> HardwareComponent:
     if global_config.simulation:
         return make_piper_hardware(
@@ -141,6 +142,7 @@ def piper_hardware(
         gripper=gripper,
         home_joints=home_joints,
         canonical_joint_names=canonical_joint_names,
+        adapter_kwargs={"judge_can": judge_can},
     )
 
 

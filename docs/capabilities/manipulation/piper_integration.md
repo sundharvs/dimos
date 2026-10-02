@@ -55,3 +55,83 @@ dimos --can-port can0 run teleop-webxr-piper
 ```
 
 Note that ommitting the `--can-port` argument will fallback the control coordinator to use fake hardware adapter. This is good for testing.
+
+## Serial CAN adapters (slcan) on a recent kernel
+
+A CANable / CANable2 running the `slcan` serial firmware shows up as
+`/dev/ttyACM0` and not as a CAN interface. Kernel 6.1 and newer ship a
+SocketCAN-aware `slcan` driver, so attach the device and then configure it
+like any other interface:
+
+```bash
+sudo modprobe slcan
+sudo slcan_attach /dev/ttyACM0          # creates can0
+dimos hardware can setup can0           # bitrate 1000000, txqueuelen, up
+dimos hardware can status can0          # expect "bitrate 1000000"
+candump can0                            # feedback frames once the arm is powered
+```
+
+If `ip -details link show can0` does not print a bitrate (older slcan
+firmware set up with `slcand -s8`), `piper_sdk`'s start-up check rejects the
+port. Skip that check with `PIPER_JUDGE_CAN=0` for the scene blueprints
+below, or pass `adapter_kwargs={"judge_can": False}` to `make_piper_hardware`
+in your own blueprint.
+
+Serial CAN is throughput-limited. If `candump` shows gaps or joint feedback
+goes stale while the coordinator runs, flash the adapter with candleLight
+firmware so it binds to `gs_usb` as a native SocketCAN device.
+
+## Piper with an RGB scene camera
+
+`piper-scene` and `piper-scene-coordinator` add a V4L2 camera to the
+coordinator. Any UVC device works, including an Intel RealSense used for its
+colour stream only (no librealsense or `pyrealsense2` needed):
+
+```bash
+PIPER_SCENE_CAMERA=/dev/video6 dimos --can-port can0 run piper-scene
+```
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PIPER_SCENE_CAMERA` | `/dev/video6` | V4L2 node or index of the RGB stream |
+| `PIPER_SCENE_CAMERA_WIDTH` / `_HEIGHT` | `1280` / `720` | capture size |
+| `PIPER_SCENE_CAMERA_FPS` | `15` | software frame-rate cap |
+| `PIPER_JUDGE_CAN` | `1` | set `0` to skip the piper_sdk CAN self-check |
+
+For a RealSense, the by-id `video-index0` link is the depth node; use the
+`/dev/videoN` or by-path node that OpenCV opens as YUYV.
+
+`piper-scene` includes the Drake planner (`plan_to_joints`, `plan_to_poses`,
+`move_linear`, `execute` RPCs plus a viser model view). `piper-scene-coordinator`
+is the lighter variant with only joint trajectories and the gripper task.
+Frames appear in Rerun under `world/color_image`.
+
+Sending commands once running:
+
+```bash
+dimos shell
+>>> app.ControlCoordinator.get_joint_positions()
+>>> app.ControlCoordinator.task_invoke("arm_gripper", "set_normalized", {"values": [1.0]})
+>>> app.ControlCoordinator.set_estop(True)          # software stop
+
+uv run python -m dimos.manipulation.control.coordinator_client   # joint moves in degrees
+```
+
+The Piper adapter moves every joint to the zero pose when it connects and
+again before it disables the arm on shutdown. Clear the workspace first.
+
+### The arm connects but does not move
+
+Check the control mode byte of the arm's status frame:
+
+```bash
+candump can0,2A1:7FF | head -1     # first data byte: 00 standby, 01 CAN control, 02 teaching
+```
+
+In teaching mode (`02`) the arm reports its motors as enabled yet ignores
+every joint command, and the adapter logs an error at connect. Only the mode
+button on the arm's base leaves that mode: put the arm in standby (solid
+green LED), then restart the blueprint. The adapter's connect sequence
+(reset, enable, CAN control mode) then takes over. Note that on enable the
+arm immediately executes the last joint target it latched, so leave it at
+rest before restarting.

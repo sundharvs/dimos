@@ -55,7 +55,11 @@ ENABLE_RETRY_INTERVAL = 0.01
 
 # Default configurable parameters
 DEFAULT_GRIPPER_SPEED = 1000
-GRIPPER_DISABLE_CODE = 0x02
+GRIPPER_DISABLE_CODE = 0x02  # disable and clear errors
+GRIPPER_PLAIN_DISABLE_CODE = 0x00
+GRIPPER_ENABLE_CODE = 0x01
+GRIPPER_ENABLE_EDGE_WAIT = 0.1
+TEACHING_MODE = 0x02  # ctrl_mode in the arm status frame
 
 logger = setup_logger()
 
@@ -76,6 +80,7 @@ class PiperAdapter(ManipulatorAdapter):
         address: str = "can0",
         dof: int = 6,
         gripper_speed: int = DEFAULT_GRIPPER_SPEED,
+        judge_can: bool = True,
         **_: object,
     ) -> None:
         if dof not in (6, 7):
@@ -83,6 +88,9 @@ class PiperAdapter(ManipulatorAdapter):
                 f"PiperAdapter supports 6 arm joints and one optional joint (got {dof})"
             )
         self._can_port = address
+        # piper_sdk's CAN self-check needs `ip -details` to report the 1 Mbit
+        # bitrate; slcan interfaces do not, so callers may opt out.
+        self._judge_can = judge_can
         self._dof = dof
         self._arm_dof = 6
         self._gripper_dof = dof - self._arm_dof
@@ -98,7 +106,7 @@ class PiperAdapter(ManipulatorAdapter):
         try:
             sdk = C_PiperInterface_V2(
                 can_name=self._can_port,
-                judge_flag=True,  # Enable safety checks
+                judge_flag=self._judge_can,  # CAN port existence/UP/bitrate checks
                 can_auto_init=True,  # Let SDK handle CAN initialization
                 dh_is_offset=False,
             )
@@ -118,12 +126,35 @@ class PiperAdapter(ManipulatorAdapter):
                     return False
                 self._connected = True
                 logger.info("Piper connected", can_port=self._can_port)
+                self._warn_if_teaching_mode()
                 return True
             logger.error("Failed to connect to Piper: no status received", can_port=self._can_port)
             return False
         except Exception:
             logger.exception("Failed to connect to Piper", can_port=self._can_port)
             return False
+
+    def _warn_if_teaching_mode(self) -> None:
+        """Log loudly when the arm is in teaching mode.
+
+        In that mode the arm keeps reporting its motors as enabled but silently
+        ignores every joint command. Only the mode button on the arm's base
+        can leave it (put the arm in standby), so tell the operator.
+        """
+        sdk = self._sdk
+        if sdk is None:
+            return
+        try:
+            status = sdk.GetArmStatus()
+            ctrl_mode = int(getattr(status.arm_status, "ctrl_mode", 0))
+        except Exception:
+            return
+        if ctrl_mode == TEACHING_MODE:
+            logger.error(
+                "Piper is in teaching mode and will ignore joint commands; "
+                "put the arm in standby with its mode button, then restart",
+                can_port=self._can_port,
+            )
 
     def _initialize_startup_state(self) -> bool:
         """Run Piper's fixed reset, zero-pose, and startup settle sequence."""
@@ -153,7 +184,12 @@ class PiperAdapter(ManipulatorAdapter):
 
         if self._gripper_dof:
             try:
-                sdk.GripperCtrl(0, DEFAULT_GRIPPER_SPEED, 0x01, 0)
+                # The gripper only latches an enable on a disable -> enable
+                # transition; a steady 0x01 after 0x02 (disable + clear
+                # error, sent at disconnect) leaves it disabled.
+                sdk.GripperCtrl(0, DEFAULT_GRIPPER_SPEED, GRIPPER_PLAIN_DISABLE_CODE, 0)
+                time.sleep(GRIPPER_ENABLE_EDGE_WAIT)
+                sdk.GripperCtrl(0, DEFAULT_GRIPPER_SPEED, GRIPPER_ENABLE_CODE, 0)
                 self._gripper_initialized = True
             except Exception:
                 logger.warning("Piper gripper startup command failed; continuing arm startup")
@@ -518,8 +554,9 @@ class PiperAdapter(ManipulatorAdapter):
         if self._sdk is None:
             return False
         try:
-            self._sdk.GripperCtrl(0, self._gripper_speed, GRIPPER_DISABLE_CODE, 0)
-            self._sdk.GripperCtrl(0, self._gripper_speed, 0x01, 0)
+            self._sdk.GripperCtrl(0, self._gripper_speed, GRIPPER_PLAIN_DISABLE_CODE, 0)
+            time.sleep(GRIPPER_ENABLE_EDGE_WAIT)
+            self._sdk.GripperCtrl(0, self._gripper_speed, GRIPPER_ENABLE_CODE, 0)
             self._gripper_initialized = True
             return True
         except Exception:
@@ -651,7 +688,7 @@ class PiperAdapter(ManipulatorAdapter):
             gripper_position = round(
                 max(0.0, min(GRIPPER_MAX_OPENING_M, position)) * GRIPPER_STROKE_UNITS_PER_M
             )
-            self._sdk.GripperCtrl(gripper_position, self._gripper_speed, 0x01, 0)
+            self._sdk.GripperCtrl(gripper_position, self._gripper_speed, GRIPPER_ENABLE_CODE, 0)
             return True
         except Exception:
             pass
