@@ -24,7 +24,11 @@ from dimos.teleop.xr_server.module import XrServerTeleopModule
 # XArm7: right wrist flies the TCP, left hand signs commands and drives the gripper.
 # The operator stands facing the robot's -Y. 100 Hz matches the coordinator tick.
 teleop_xr_server_xarm7 = autoconnect(
-    XrServerTeleopModule.blueprint(body_yaw_deg=-90.0, control_loop_hz=100.0),
+    XrServerTeleopModule.blueprint(
+        body_yaw_deg=-90.0,
+        control_loop_hz=100.0,
+        home_joints_deg=[-95.6, -16.4, 2.0, 38.7, 1.0, 53.0, -7.5],
+    ),
     coordinator_teleop_xarm7,
 ).remappings(
     [

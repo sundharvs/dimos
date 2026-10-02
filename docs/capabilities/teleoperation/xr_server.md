@@ -40,18 +40,19 @@ commands, so the gripper holds while you sign.
 | Sign | Action |
 |------|--------|
 | index only | latch / re-latch |
-| index + middle | start take (latches first) / save take (then releases) |
-| three fingers | **stop**: release the latch, the arm holds |
-| pinky only | discard take, release |
+| index + middle | start take (latches first) / save take (then releases and homes) |
+| three fingers | **stop and home**: release the latch, open the gripper, move to `home_joints_deg` |
+| pinky only | discard take, release and home |
 | fist / open hand | close / open gripper (`gripper_hand="left"`) |
 
 Take start/save and discard pulse `B` and `Y` on `teleop_buttons`, which is
 `EpisodeMonitorModule`'s default button map. From `dimos shell` you can also
 call `latch()` and `release()`.
 
-> **TODO: homing.** The reference rig homes the arm (gripper open, fixed start
-> joints) on three fingers and after every take. dimos has no blocking home
-> task for teleop yet, so three fingers only stops for now.
+Homing is a blocking planned move through `ManipulationModule` (plan to
+`home_joints_deg`, then execute). The latch is refused until it finishes. With
+`home_joints_deg` unset, or no `ManipulationModule` in the blueprint, these
+signs only release. `home()` is also callable from `dimos shell`.
 
 ## Configuration
 
@@ -63,6 +64,7 @@ call `latch()` and `release()`.
 | `position_scale` | 1.0 | Bring-up value; the reference rig used 2.2 |
 | `body_yaw_deg` | 0 | Operator facing relative to robot +x. `teleop-xr-server-xarm7` sets −90 (operator faces the robot's −Y) |
 | `gestures` | true | Enables the left-hand sign commands |
+| `home_joints_deg` | none | Home joint pose in degrees; none disables homing |
 | `gripper_hand` | `left` | `right` = thumb–index pinch (> 5 cm opens) |
 
 ## Bring-up

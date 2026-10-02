@@ -241,7 +241,9 @@ coordinator_teleop_xarm7 = autoconnect(
                 priority=20,
                 stream_bind={"gripper_command": "right_gripper_command"},
             ),
-            trajectory_task(_xarm7_teleop_hw),
+            # Above eef_twist, which is always active at 10 and would otherwise
+            # win the tie and block planned moves (e.g. XR teleop homing).
+            trajectory_task(_xarm7_teleop_hw, priority=15),
         ],
     ),
     ManipulationModule.blueprint(

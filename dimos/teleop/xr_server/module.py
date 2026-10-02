@@ -51,9 +51,11 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.imitation.collection.episode_monitor import EpisodeStatus
+from dimos.manipulation.manipulation_spec import ManipulationSpec
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.teleop.webxr.controller_types import Buttons
 from dimos.teleop.xr_server.body_pose import XrBodyPose, bones_to_body_pose
@@ -69,6 +71,8 @@ from dimos.utils.logging_config import setup_logger
 logger = setup_logger()
 
 POSE_FRAME_ID = "xr_body"
+# Upper bound on the blocking homing move, so a stuck trajectory cannot hang homing.
+HOME_TIMEOUT_S = 30.0
 # Buttons pulsed for EpisodeMonitorModule's default button map.
 _TAKE_TOGGLE_BUTTON = "right_secondary"  # "B"
 _TAKE_DISCARD_BUTTON = "left_secondary"  # "Y"
@@ -95,6 +99,9 @@ class XrServerTeleopConfig(ModuleConfig):
     # Reset on every latch so a re-latch is not smeared. 0 disables it.
     ema_tau_s: float = Field(default=0.15, ge=0)
     gestures: bool = True
+    # Joint pose (degrees) the arm homes to on the stop sign and after every
+    # saved or discarded take. None disables homing: the stop sign only releases.
+    home_joints_deg: list[float] | None = None
     gripper_hand: Literal["left", "right"] = "left"
 
 
@@ -107,6 +114,9 @@ class XrServerTeleopModule(Module):
     right_gripper_command: Out[Float32]
     teleop_buttons: Out[Buttons]
     status: In[EpisodeStatus]
+
+    # Plans and executes the homing move; absent in receiver-only blueprints.
+    _manipulation: ManipulationSpec | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -130,6 +140,7 @@ class XrServerTeleopModule(Module):
         self._gate = GestureGate()
         self._pulse: set[str] = set()
         self._recording = False
+        self._home_thread: threading.Thread | None = None
 
         self._server: uvicorn.Server | None = None
         self._server_thread: threading.Thread | None = None
@@ -304,18 +315,22 @@ class XrServerTeleopModule(Module):
                 # Ending a take: save, then go cold so the operator re-latches.
                 self._pulse.add(_TAKE_TOGGLE_BUTTON)
                 self._release_locked("take saved")
+                self._start_home_locked()
             elif self._latch_locked(wrist):
                 # Starting a take latches first so frame 0 is the latched pose.
                 self._pulse.add(_TAKE_TOGGLE_BUTTON)
         elif command is Gesture.THREE:
-            # TODO: home the arm (blocking move to fixed start joints, gripper
-            # open) once a home task exists. For now three fingers only stops.
             self._release_locked("stop gesture")
+            self._start_home_locked()
         elif command is Gesture.PINKY:
             self._pulse.add(_TAKE_DISCARD_BUTTON)
             self._release_locked("take discarded")
+            self._start_home_locked()
 
     def _latch_locked(self, wrist: NDArray[np.float64] | None) -> bool:
+        if self._homing_locked():
+            logger.warning("Cannot latch: arm is homing")
+            return False
         if wrist is None:
             logger.warning("Cannot latch: no XR wrist")
             return False
@@ -331,6 +346,68 @@ class XrServerTeleopModule(Module):
         self._ema_position = self._ema_rotation = None
         logger.info("XR teleop latched")
         return True
+
+    # ── homing ───────────────────────────────────────────────────────────────
+
+    @rpc
+    def home(self) -> None:
+        """Release the latch, open the gripper and move to the home joints."""
+        with self._lock:
+            self._release_locked("home requested")
+            self._start_home_locked()
+
+    def _homing_locked(self) -> bool:
+        return self._home_thread is not None and self._home_thread.is_alive()
+
+    def _start_home_locked(self) -> None:
+        if self.config.home_joints_deg is None or self._manipulation is None:
+            return
+        if self._homing_locked():
+            return
+        # The gripper opens with the home move; follow it so the next latch
+        # does not command it closed again.
+        self._gripper_closed = False
+        self._home_thread = threading.Thread(
+            target=self._home, daemon=True, name="XrServerTeleopHome"
+        )
+        self._home_thread.start()
+
+    def _home(self) -> None:
+        """Blocking homing move. Runs off the control loop, which keeps publishing
+        the released deadman so TeleopIKTask stays disengaged throughout."""
+        manipulation = self._manipulation
+        home_deg = self.config.home_joints_deg
+        assert manipulation is not None and home_deg is not None
+        try:
+            groups = manipulation.list_planning_groups()
+            if len(groups) != 1:
+                logger.error("Cannot home: expected one planning group", count=len(groups))
+                return
+            group = groups[0]
+            if len(home_deg) != len(group.joint_names):
+                logger.error(
+                    "Cannot home: home_joints_deg length does not match the arm",
+                    expected=len(group.joint_names),
+                    got=len(home_deg),
+                )
+                return
+            logger.info("XR teleop homing")
+            if group.has_gripper:
+                manipulation.set_gripper_position(1.0, group.id)
+            target = JointState(
+                name=list(group.joint_names), position=np.radians(home_deg).tolist()
+            )
+            plan = manipulation.plan_to_joints({group.id: target})
+            if not plan.succeeded:
+                logger.error("Homing plan failed", status=plan.status.name, error=plan.message)
+                return
+            result = manipulation.execute(blocking=True, timeout=HOME_TIMEOUT_S)
+            if not result.succeeded:
+                logger.error("Homing move failed", status=result.status.name, error=result.message)
+                return
+            logger.info("XR teleop homed; latch to go live")
+        except Exception:
+            logger.exception("Homing failed")
 
     def _release_locked(self, reason: str) -> None:
         if self._latched:
