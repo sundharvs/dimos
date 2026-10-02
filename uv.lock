@@ -2137,6 +2137,9 @@ webrtc = [
     { name = "aiohttp" },
     { name = "aiortc" },
 ]
+xr-server = [
+    { name = "xr-robot-teleop-server" },
+]
 
 [package.dev-dependencies]
 autofix = [
@@ -2159,7 +2162,7 @@ lint = [
     { name = "aiortc" },
     { name = "can-motor-control" },
     { name = "chromadb" },
-    { name = "dimos", extra = ["visualization", "web", "webrtc"] },
+    { name = "dimos", extra = ["visualization", "web", "webrtc", "xr-server"] },
     { name = "einops" },
     { name = "gdown" },
     { name = "googlemaps" },
@@ -2203,7 +2206,7 @@ lint = [
 project-deps = [
     { name = "can-motor-control" },
     { name = "chromadb" },
-    { name = "dimos", extra = ["visualization", "web", "webrtc"] },
+    { name = "dimos", extra = ["visualization", "web", "webrtc", "xr-server"] },
     { name = "einops" },
     { name = "gdown" },
     { name = "googlemaps" },
@@ -2232,7 +2235,7 @@ tests = [
     { name = "chromadb" },
     { name = "coacd" },
     { name = "coverage" },
-    { name = "dimos", extra = ["apriltag", "cpu", "drone", "learning", "mapping", "visualization", "web", "webrtc"] },
+    { name = "dimos", extra = ["apriltag", "cpu", "drone", "learning", "mapping", "visualization", "web", "webrtc", "xr-server"] },
     { name = "einops" },
     { name = "gdown" },
     { name = "googlemaps" },
@@ -2285,7 +2288,7 @@ tests-self-hosted = [
     { name = "coacd" },
     { name = "coverage" },
     { name = "dim-odom" },
-    { name = "dimos", extra = ["apriltag", "cpu", "drone", "learning", "manipulation", "mapping", "misc", "unitree", "visualization", "web", "webrtc"] },
+    { name = "dimos", extra = ["apriltag", "cpu", "drone", "learning", "manipulation", "mapping", "misc", "unitree", "visualization", "web", "webrtc", "xr-server"] },
     { name = "einops" },
     { name = "gdown" },
     { name = "googlemaps" },
@@ -2471,10 +2474,11 @@ requires-dist = [
     { name = "websocket-client", specifier = ">=1.8" },
     { name = "xacro", marker = "extra == 'control'" },
     { name = "xarm-python-sdk", marker = "extra == 'control'", specifier = ">=1.17.0" },
+    { name = "xr-robot-teleop-server", marker = "extra == 'xr-server'", specifier = "==0.1.9" },
     { name = "yourdfpy", marker = "(platform_machine != 'aarch64' and extra == 'visualization') or (sys_platform != 'linux' and extra == 'visualization')", specifier = ">=0.0.60" },
     { name = "yourdfpy", marker = "extra == 'planning'", specifier = ">=0.0.60" },
 ]
-provides-extras = ["misc", "spot", "visualization", "learning", "agents", "web", "perception", "unitree", "unitree-dds", "control", "planning", "manipulation", "cpu", "cuda", "sim", "mapping", "drone", "dds", "webrtc", "base", "apriltag", "scene", "all"]
+provides-extras = ["misc", "spot", "visualization", "learning", "agents", "web", "perception", "unitree", "unitree-dds", "control", "planning", "manipulation", "cpu", "cuda", "sim", "mapping", "drone", "dds", "webrtc", "xr-server", "base", "apriltag", "scene", "all"]
 
 [package.metadata.requires-dev]
 autofix = [{ name = "ruff", specifier = "==0.14.3" }]
@@ -2491,7 +2495,7 @@ lint = [
     { name = "aiortc", specifier = ">=1.14.0" },
     { name = "can-motor-control", specifier = ">=0.0.8" },
     { name = "chromadb", specifier = ">=1.0.0" },
-    { name = "dimos", extras = ["web", "visualization", "webrtc"] },
+    { name = "dimos", extras = ["web", "visualization", "webrtc", "xr-server"] },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "gdown", specifier = "==6.0.0" },
     { name = "googlemaps", specifier = ">=4.10.0" },
@@ -2534,7 +2538,7 @@ lint = [
 project-deps = [
     { name = "can-motor-control", specifier = ">=0.0.8" },
     { name = "chromadb", specifier = ">=1.0.0" },
-    { name = "dimos", extras = ["web", "visualization", "webrtc"] },
+    { name = "dimos", extras = ["web", "visualization", "webrtc", "xr-server"] },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "gdown", specifier = "==6.0.0" },
     { name = "googlemaps", specifier = ">=4.10.0" },
@@ -2564,7 +2568,7 @@ tests = [
     { name = "coacd", specifier = ">=1.0.0" },
     { name = "coverage", specifier = ">=7.0" },
     { name = "dimos", extras = ["apriltag", "mapping", "drone", "cpu", "learning"] },
-    { name = "dimos", extras = ["web", "visualization", "webrtc"] },
+    { name = "dimos", extras = ["web", "visualization", "webrtc", "xr-server"] },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "gdown", specifier = "==6.0.0" },
     { name = "googlemaps", specifier = ">=4.10.0" },
@@ -2619,7 +2623,7 @@ tests-self-hosted = [
     { name = "dim-odom", specifier = ">=0.4.1" },
     { name = "dimos", extras = ["apriltag", "mapping", "drone", "cpu", "learning"] },
     { name = "dimos", extras = ["manipulation", "misc", "unitree"] },
-    { name = "dimos", extras = ["web", "visualization", "webrtc"] },
+    { name = "dimos", extras = ["web", "visualization", "webrtc", "xr-server"] },
     { name = "einops", specifier = ">=0.8.1" },
     { name = "gdown", specifier = "==6.0.0" },
     { name = "googlemaps", specifier = ">=4.10.0" },
@@ -4918,6 +4922,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/aa/85/4890a7c14b4fa54400945cb52ac3cd88545bbdb973c440f98ca41591cdc5/llvmlite-0.46.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:3535bd2bb6a2d7ae4012681ac228e5132cdb75fefb1bcb24e33f2f3e0c865ed4", size = 56275176, upload-time = "2025-12-08T18:15:03.936Z" },
     { url = "https://files.pythonhosted.org/packages/6a/07/3d31d39c1a1a08cd5337e78299fca77e6aebc07c059fbd0033e3edfab45c/llvmlite-0.46.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4cbfd366e60ff87ea6cc62f50bc4cd800ebb13ed4c149466f50cf2163a473d1e", size = 55128630, upload-time = "2025-12-08T18:15:07.196Z" },
     { url = "https://files.pythonhosted.org/packages/2a/6b/d139535d7590a1bba1ceb68751bef22fadaa5b815bbdf0e858e3875726b2/llvmlite-0.46.0-cp312-cp312-win_amd64.whl", hash = "sha256:398b39db462c39563a97b912d4f2866cd37cba60537975a09679b28fbbc0fb38", size = 38138940, upload-time = "2025-12-08T18:15:10.162Z" },
+]
+
+[[package]]
+name = "loguru"
+version = "0.7.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "win32-setctime", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl", hash = "sha256:31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c", size = 61595, upload-time = "2024-12-06T11:20:54.538Z" },
 ]
 
 [[package]]
@@ -7907,6 +7924,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/95/03/1fd98d5841cd7964a27d729ccf2199602fe05eb7a405c1462eb7277945ed/pyee-13.0.0.tar.gz", hash = "sha256:b391e3c5a434d1f5118a25615001dbc8f669cf410ab67d04c4d4e07c55481c37", size = 31250, upload-time = "2025-03-17T18:53:15.955Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9b/4d/b9add7c84060d4c1906abe9a7e5359f2a60f7a9a4f67268b2766673427d8/pyee-13.0.0-py3-none-any.whl", hash = "sha256:48195a3cddb3b1515ce0695ed76036b5ccc2ef3a9f963ff9f77aec0139845498", size = 15730, upload-time = "2025-03-17T18:53:14.532Z" },
+]
+
+[[package]]
+name = "pyequilib"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "torch", version = "2.7.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7f/73/a583269cb2637966b061c34729112ff9d419ed30b1d4650f7e3f1c123062/pyequilib-0.6.0.tar.gz", hash = "sha256:12e8156b6cc829d283b2dd4f956ad222a019f5b6a52e7ff4b49c65eb68a77b94", size = 241753, upload-time = "2026-06-21T23:55:20.66Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/68/2c/37c892457b1602f368de5b5010e94f0e54616a65d58a9c079484c2240cc9/pyequilib-0.6.0-py3-none-any.whl", hash = "sha256:f2399c19589ae5a282efe0d13c1aa9f577ccfd06ecaca44d1665c21a0ceab5f2", size = 62191, upload-time = "2026-06-21T23:55:19.407Z" },
 ]
 
 [[package]]
@@ -10993,6 +11025,15 @@ wheels = [
 ]
 
 [[package]]
+name = "win32-setctime"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/8f/705086c9d734d3b663af0e9bb3d4de6578d08f46b1b101c2442fd9aecaa2/win32_setctime-1.2.0.tar.gz", hash = "sha256:ae1fdf948f5640aae05c511ade119313fb6a30d7eabe25fef9764dca5873c4c0", size = 4867, upload-time = "2024-12-07T15:28:28.314Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e1/07/c6fe3ad3e685340704d314d765b7912993bcb8dc198f0e7a89382d37974b/win32_setctime-1.2.0-py3-none-any.whl", hash = "sha256:95d644c4e708aba81dc3704a116d8cbc974d70b3bdb8be1d150e36be6e9d1390", size = 4083, upload-time = "2024-12-07T15:28:26.465Z" },
+]
+
+[[package]]
 name = "winrt-runtime"
 version = "3.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -11242,6 +11283,31 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/27/dd/073cf64fa9e74cfb97c9ded97750ed4652ada1b4921cd0e7d895ff242f7c/xarm_python_sdk-1.17.3.tar.gz", hash = "sha256:e61b988bc3be684c15f8e686958c00e619e14725130ee94148074b8ef5bd9ec3", size = 215842, upload-time = "2025-12-02T03:09:49.342Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/40/0a/85b3df0fa6ddd4f1a9d23cd63948aa145797631c9e20d165ada8e13a058c/xarm_python_sdk-1.17.3-py3-none-any.whl", hash = "sha256:3dee2f9819d54f0ba476ea51ff63f2d1eb248e0658da1b1dcab8c519008955bb", size = 186790, upload-time = "2025-12-02T03:09:47.606Z" },
+]
+
+[[package]]
+name = "xr-robot-teleop-server"
+version = "0.1.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiortc" },
+    { name = "fastapi" },
+    { name = "loguru" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "opencv-python", marker = "sys_platform == 'never'" },
+    { name = "pillow" },
+    { name = "pyequilib" },
+    { name = "python-multipart" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "torch", version = "2.6.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "torch", version = "2.7.1+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'win32'" },
+    { name = "uvicorn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/97/fb/0a29286ef0a6994529aacb7c60665c2253898af64c58b03c3075d17323f1/xr_robot_teleop_server-0.1.9.tar.gz", hash = "sha256:0c8a46ccce7fb9f022d912f50ef743332baff9460caf895e7b5a6f878b3b580e", size = 14624118, upload-time = "2025-12-02T03:18:46.092Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/e7/e90be2d6860c8a99f9edc619516bdfa61e89f5c839c766dc15b689b03a0f/xr_robot_teleop_server-0.1.9-py3-none-any.whl", hash = "sha256:ed0ca153873c0bc6c7c41a741e2fe5b22c699242455cd5c80965a085093e29a2", size = 28692, upload-time = "2025-12-02T03:18:43.911Z" },
 ]
 
 [[package]]

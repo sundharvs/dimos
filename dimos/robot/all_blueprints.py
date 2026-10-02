@@ -64,6 +64,7 @@ all_blueprints = {
     "demo-skill": "dimos.agents.skills.demo_skill:demo_skill",
     "demo-virtual-mid360-fastlio": "dimos.hardware.sensors.lidar.virtual_mid360.blueprints:demo_virtual_mid360_fastlio",
     "demo-virtual-mid360-pointlio": "dimos.hardware.sensors.lidar.virtual_mid360.blueprints:demo_virtual_mid360_pointlio",
+    "demo-xr-server-receiver": "dimos.teleop.xr_server.blueprints:demo_xr_server_receiver",
     "desk-marker-tf": "dimos.perception.fiducial.blueprints.desk_marker_tf:desk_marker_tf",
     "drone-agentic": "dimos.robot.drone.blueprints.agentic.drone_agentic:drone_agentic",
     "drone-basic": "dimos.robot.drone.blueprints.basic.drone_basic:drone_basic",
@@ -138,6 +139,7 @@ all_blueprints = {
     "teleop-webxr-xarm6": "dimos.teleop.webxr.blueprints:teleop_webxr_xarm6",
     "teleop-webxr-xarm7": "dimos.teleop.webxr.blueprints:teleop_webxr_xarm7",
     "teleop-webxr-xarm7-video": "dimos.teleop.webxr.blueprints:teleop_webxr_xarm7_video",
+    "teleop-xr-server-xarm7": "dimos.teleop.xr_server.blueprints:teleop_xr_server_xarm7",
     "unitree-g1": "dimos.robot.unitree.g1.blueprints.perceptive.unitree_g1:unitree_g1",
     "unitree-g1-agentic": "dimos.robot.unitree.g1.blueprints.agentic.unitree_g1_agentic:unitree_g1_agentic",
     "unitree-g1-agentic-sim": "dimos.robot.unitree.g1.blueprints.agentic.unitree_g1_agentic_sim:unitree_g1_agentic_sim",
@@ -375,5 +377,6 @@ all_modules = {
     "world-belief-module": "dimos.experimental.world_belief.worldbelief_module.WorldBeliefModule",
     "world-belief-recorder": "dimos.experimental.world_belief.worldbelief_recorder.WorldBeliefRecorder",
     "wrist-camera": "dimos.teleop.hosted.blueprints.cloudflare.WristCamera",
+    "xr-server-teleop-module": "dimos.teleop.xr_server.module.XrServerTeleopModule",
     "zed-camera": "dimos.hardware.sensors.camera.zed.camera.ZEDCamera",
 }

@@ -349,6 +349,11 @@ webrtc = [
     "aiohttp>=3.9.0",
 ]
 
+xr-server = [
+    # Full-body + hand tracking from the XR headset app over WebRTC
+    "xr-robot-teleop-server==0.1.9",
+]
+
 base = [
     "dimos[agents,web,perception,visualization]",
 ]
@@ -382,7 +387,7 @@ autofix = ["ruff==0.14.3"]
 
 # Project deps shared by `tests` and `lint`.
 project-deps = [
-    "dimos[web,visualization,webrtc]",
+    "dimos[web,visualization,webrtc,xr-server]",
     # Blackwell (sm_120) needs torch 2.7 from pytorch-cu128. Cap below 2.8.
     "torch>=2.1,<2.8",
     "torchvision>=0.16,<0.23",
@@ -697,6 +702,9 @@ module = [
     # dev-group only (tuning), so absent from the default sync and from CI
     "optuna",
     "optuna.*",
+    # No py.typed marker
+    "xr_robot_teleop_server",
+    "xr_robot_teleop_server.*",
 ]
 ignore_missing_imports = true
 
