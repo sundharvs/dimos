@@ -50,6 +50,51 @@ MUJOCO_GL=egl LIBGL_ALWAYS_SOFTWARE=true MESA_LOADER_DRIVER_OVERRIDE=llvmpipe \
   dimos --viewer none run xarm-grasp --simulation mujoco
 ```
 
+## Calibrating the wrist camera
+
+On hardware every detection reaches the world frame through
+`XARM_WRIST_CAMERA_TRANSFORM`, the `link7 -> camera_link` mount edge in
+`grasp.py`. Re-measure it whenever the camera mount moves. A rotation error in
+the mount becomes a position error proportional to range, about 4.4 mm at 0.5 m
+per half degree, so scanning from a raised pose needs a better calibration than
+scanning from close up.
+
+1. Print a ChArUco board and measure the printed square size with a rule:
+
+   ```bash
+   python -m dimos.manipulation.calibration.charuco --out charuco.png
+   ```
+
+2. Fix the board flat on the table, then run the calibration blueprint with
+   the **measured** square size:
+
+   ```bash
+   dimos run xarm7-hand-eye-calibration --xarm7-ip 192.168.1.x --square-mm 34.0
+   ```
+
+3. Jog the arm in the Keyboard Teleop window. In the Hand-eye calibration
+   window press SPACE to capture, U to undo and C to compute. Take 15 to 20
+   poses, turning the wrist about a different axis at each one while keeping
+   the board in view, and vary the distance around the range you will scan
+   from. Translating the arm constrains nothing.
+
+The module never commands the arm. Each capture requires the arm to have been
+still and the board to reproject under 1 px. Rotation diversity is shown live;
+below 0.15 the solve is refused, and above 0.4 is well spread.
+
+Computing runs all five OpenCV hand-eye solvers and keeps the one under which
+the board's recovered base-frame pose is most consistent across captures. That
+spread, in mm and degrees, is the number to judge the calibration by. The
+solvers disagreeing by more than 5 mm means the data is thin. The result,
+the per-method table and every capture go to
+`~/.local/state/dimos/calibration/hand_eye.json`, and the report prints a
+`Transform(...)` to paste over `XARM_WRIST_CAMERA_TRANSFORM`. To re-solve the
+saved captures offline:
+
+```bash
+python -m dimos.manipulation.calibration.hand_eye_module
+```
+
 ## Voxel map obstacles
 
 The wrist camera feeds a live voxel map that the planner treats as one octree

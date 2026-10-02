@@ -1,0 +1,3 @@
+from . import Surface
+
+def frombuffer(buffer: bytes, size: tuple[int, int], format: str) -> Surface: ...
