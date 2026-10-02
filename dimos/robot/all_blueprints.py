@@ -197,6 +197,7 @@ all_blueprints = {
     "xarm-perception-sim": "dimos.robot.manipulators.xarm.blueprints.simulation:xarm_perception_sim",
     "xarm-perception-sim-agent": "dimos.robot.manipulators.xarm.blueprints.agentic:xarm_perception_sim_agent",
     "xarm6-worldbelief": "dimos.experimental.world_belief.xarm6_blueprint:xarm6_worldbelief",
+    "xarm7-hand-eye-calibration": "dimos.robot.manipulators.xarm.blueprints.calibration:xarm7_hand_eye_calibration",
     "xarm7-planner-coordinator": "dimos.robot.manipulators.xarm.blueprints.basic:xarm7_planner_coordinator",
     "xarm7-planner-coordinator-agent": "dimos.robot.manipulators.xarm.blueprints.agentic:xarm7_planner_coordinator_agent",
 }
@@ -271,6 +272,7 @@ all_modules = {
     "grasping-module": "dimos.manipulation.grasping.grasping.GraspingModule",
     "gstreamer-camera-module": "dimos.hardware.sensors.camera.gstreamer.gstreamer_camera.GstreamerCameraModule",
     "habitat-connection": "dimos.simulation.habitat.connection.HabitatConnection",
+    "hand-eye-calibration-module": "dimos.manipulation.calibration.hand_eye_module.HandEyeCalibrationModule",
     "hand-teleop-module": "dimos.teleop.webxr.extensions.HandTeleopModule",
     "heuristic-grasp-module": "dimos.manipulation.grasping.heuristic_grasp.HeuristicGraspModule",
     "hosted-stats-module": "dimos.teleop.hosted.hosted_stats.HostedStatsModule",
