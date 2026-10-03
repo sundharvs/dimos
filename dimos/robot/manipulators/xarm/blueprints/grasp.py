@@ -17,6 +17,7 @@
 ``dimos run xarm-grasp --xarm7-ip 192.168.1.x``   heuristic grasps
 ``dimos run xarm-grasp-graspgenx --xarm7-ip ...`` learned grasps
 ``dimos run xarm-grasp-keyboard --xarm7-ip ...``  heuristic grasps + keyboard jog
+``dimos run xarm-grasp-graspgenx-keyboard --xarm7-ip ...``  learned grasps + keyboard jog
 ``dimos run xarm-grasp --simulation mujoco``      the same stack in MuJoCo
 
 Only the grasp provider separates the two blueprints. The arm-versus-sim split is
@@ -282,7 +283,7 @@ xarm_grasp = autoconnect(*_XARM_GRASP_MODULES, HeuristicGraspModule.blueprint())
 # it above would preempt every planned motion.
 XARM_GRASP_TELEOP_PRIORITY = 5
 
-xarm_grasp_keyboard = autoconnect(
+_XARM_GRASP_KEYBOARD_MODULES = (
     *_XARM_GRASP_STACK,
     # The eef_twist card binds the ee_twist_command input, which only this
     # subclass declares. Keep the instance name so RPC clients still find it.
@@ -305,7 +306,18 @@ xarm_grasp_keyboard = autoconnect(
         ],
     ),
     KeyboardTeleopModule.blueprint(),
-    HeuristicGraspModule.blueprint(),
+)
+
+xarm_grasp_keyboard = autoconnect(
+    *_XARM_GRASP_KEYBOARD_MODULES, HeuristicGraspModule.blueprint()
+).remappings(_REMAPPINGS)
+
+xarm_grasp_graspgenx_keyboard = autoconnect(
+    *_XARM_GRASP_KEYBOARD_MODULES,
+    GraspGenXModule.blueprint(
+        gripper=XARM_GRIPPER_SWEEP_VOLUME,
+        grasp_frame_to_tcp=XARM_GRASP_FRAME_TO_TCP,
+    ),
 ).remappings(_REMAPPINGS)
 
 xarm_grasp_graspgenx = autoconnect(

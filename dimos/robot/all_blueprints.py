@@ -195,6 +195,7 @@ all_blueprints = {
     "xarm-grasp-agent": "dimos.robot.manipulators.xarm.blueprints.agentic:xarm_grasp_agent",
     "xarm-grasp-graspgenx": "dimos.robot.manipulators.xarm.blueprints.grasp:xarm_grasp_graspgenx",
     "xarm-grasp-graspgenx-agent": "dimos.robot.manipulators.xarm.blueprints.agentic:xarm_grasp_graspgenx_agent",
+    "xarm-grasp-graspgenx-keyboard": "dimos.robot.manipulators.xarm.blueprints.grasp:xarm_grasp_graspgenx_keyboard",
     "xarm-grasp-keyboard": "dimos.robot.manipulators.xarm.blueprints.grasp:xarm_grasp_keyboard",
     "xarm-localize-live": "dimos.perception.localize.demo_blueprints.xarm_localize_live:xarm_localize_live",
     "xarm-perception-sim": "dimos.robot.manipulators.xarm.blueprints.simulation:xarm_perception_sim",
