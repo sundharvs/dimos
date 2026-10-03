@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 from dimos.control.components import HardwareComponent, HardwareType
@@ -30,6 +31,22 @@ from dimos.robot.manipulators._modeling import (
     joint_names,
 )
 from dimos.utils.data import LfsPath
+
+# Every Piper link with collision geometry: the wrist camera's self filter needs a
+# capture-time transform for each and drops the whole cloud when one is missing.
+PIPER_COLLISION_LINKS = [
+    "base_link",
+    "link1",
+    "link2",
+    "link3",
+    "link4",
+    "link5",
+    "link6",
+    "flange_link",
+    "gripper_base",
+    "gripper_link1",
+    "gripper_link2",
+]
 
 PIPER_GRIPPER_COLLISION_EXCLUSIONS: list[tuple[str, str]] = [
     ("gripper_base", "gripper_link1"),
@@ -117,6 +134,7 @@ def piper_hardware(
     home_joints: list[float] | None = None,
     canonical_joint_names: list[str] | None = None,
     judge_can: bool = True,
+    joint_offsets: list[float] | None = None,
 ) -> HardwareComponent:
     if global_config.simulation:
         return make_piper_hardware(
@@ -142,8 +160,23 @@ def piper_hardware(
         gripper=gripper,
         home_joints=home_joints,
         canonical_joint_names=canonical_joint_names,
-        adapter_kwargs={"judge_can": judge_can},
+        adapter_kwargs={"judge_can": judge_can, "joint_offsets": joint_offsets},
     )
+
+
+def piper_joint_offsets_from_env() -> list[float] | None:
+    """Per-joint encoder offsets from ``PIPER_JOINT_OFFSETS_DEG``, in radians.
+
+    Six comma-separated degrees, e.g. ``0,0,0,0,4.42,0``: what to add to each
+    encoder reading so the URDF sees the arm's true angles. Unset means none.
+    """
+    raw = os.getenv("PIPER_JOINT_OFFSETS_DEG", "").strip()
+    if not raw:
+        return None
+    degrees = [float(value) for value in raw.split(",")]
+    if len(degrees) != 6:
+        raise ValueError(f"PIPER_JOINT_OFFSETS_DEG needs 6 values (got {len(degrees)})")
+    return [math.radians(value) for value in degrees]
 
 
 def make_piper_model_config(

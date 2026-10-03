@@ -108,6 +108,7 @@ all_blueprints = {
     "mid360-realsense-record-with-pcap": "dimos.robot.assembly.mid360_realsense_30:mid360_realsense_record_with_pcap",
     "openarm-planner-coordinator": "dimos.robot.manipulators.openarm.blueprints.basic:openarm_planner_coordinator",
     "openyam-planner-coordinator": "dimos.robot.manipulators.openyam.blueprints.basic:openyam_planner_coordinator",
+    "piper-grasp": "dimos.robot.manipulators.piper.blueprints.grasp:piper_grasp",
     "piper-hand-eye-calibration": "dimos.robot.manipulators.piper.blueprints.calibration:piper_hand_eye_calibration",
     "piper-scene": "dimos.robot.manipulators.piper.blueprints.scene:piper_scene",
     "piper-scene-coordinator": "dimos.robot.manipulators.piper.blueprints.scene:piper_scene_coordinator",

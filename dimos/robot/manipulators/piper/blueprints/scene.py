@@ -23,6 +23,8 @@ Environment overrides (read at import time):
   - capture size and software frame-rate cap (default 1280x720 @ 15 Hz).
 * ``PIPER_JUDGE_CAN`` - set to ``0`` to skip piper_sdk's CAN bitrate self-check,
   which slcan (serial CAN) interfaces cannot pass.
+* ``PIPER_JOINT_OFFSETS_DEG`` - six comma-separated degrees added to the encoder
+  readings, for an arm whose joint zeros disagree with the URDF (e.g. ``0,0,0,0,4.42,0``).
 
 Run on hardware with ``dimos --can-port can0 run piper-scene``; without
 ``--can-port`` the arm is a mock adapter and only the camera is real.
@@ -48,6 +50,7 @@ from dimos.robot.manipulators.piper.config import (
     PIPER_SIM_PATH,
     make_piper_model_config,
     piper_hardware,
+    piper_joint_offsets_from_env,
 )
 from dimos.visualization.vis_module import vis_module
 
@@ -92,7 +95,9 @@ def _rerun_blueprint() -> Any:
     )
 
 
-_piper_hw = piper_hardware("arm", judge_can=_JUDGE_CAN)
+_piper_hw = piper_hardware(
+    "arm", judge_can=_JUDGE_CAN, joint_offsets=piper_joint_offsets_from_env()
+)
 _piper_model = make_piper_model_config()
 
 _scene_camera_module = CameraModule.blueprint(hardware=_scene_camera)

@@ -128,3 +128,38 @@ def test_heuristic_grasp_rejects_invalid_pointclouds(
 ) -> None:
     with pytest.raises(ValueError, match=error):
         module.propose_grasps(_cloud(points, frame_id=frame_id, timestamp=timestamp))
+
+
+def test_heuristic_grasp_raises_tip_by_offset() -> None:
+    module = HeuristicGraspModule(tip_offset=0.12)
+    try:
+        proposals = module.propose_grasps(
+            _cloud(
+                np.asarray(
+                    [
+                        [-0.02, -0.02, 0.10],
+                        [0.02, 0.02, 0.10],
+                        [-0.02, 0.02, 0.20],
+                        [0.02, -0.02, 0.20],
+                    ]
+                )
+            )
+        )
+    finally:
+        module.stop()
+
+    pose = proposals.candidates[0].pose
+    assert pose.position.z == pytest.approx(0.15 + 0.12)
+
+
+def test_heuristic_grasp_keeps_fingertips_above_short_object_base() -> None:
+    module = HeuristicGraspModule(tip_offset=0.118, fingertip_depth=0.138, fingertip_clearance=0.01)
+    try:
+        flat = np.asarray([[-0.02, -0.02, 0.0], [0.02, 0.02, 0.0], [0.0, 0.0, 0.02]])
+        proposals = module.propose_grasps(_cloud(flat))
+    finally:
+        module.stop()
+
+    pose = proposals.candidates[0].pose
+    fingertips_z = pose.position.z - 0.138
+    assert fingertips_z == pytest.approx(0.01, abs=1e-3)

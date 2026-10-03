@@ -81,16 +81,23 @@ class PiperAdapter(ManipulatorAdapter):
         dof: int = 6,
         gripper_speed: int = DEFAULT_GRIPPER_SPEED,
         judge_can: bool = True,
+        joint_offsets: list[float] | None = None,
         **_: object,
     ) -> None:
         if dof not in (6, 7):
             raise ValueError(
                 f"PiperAdapter supports 6 arm joints and one optional joint (got {dof})"
             )
+        if joint_offsets is not None and len(joint_offsets) != 6:
+            raise ValueError(f"joint_offsets needs 6 values (got {len(joint_offsets)})")
         self._can_port = address
         # piper_sdk's CAN self-check needs `ip -details` to report the 1 Mbit
         # bitrate; slcan interfaces do not, so callers may opt out.
         self._judge_can = judge_can
+        # Radians added to each encoder reading and removed from each command,
+        # for an arm whose encoder zeros disagree with the URDF's. The startup
+        # and shutdown zero poses stay at the encoders' own zero.
+        self._joint_offsets = list(joint_offsets) if joint_offsets is not None else [0.0] * 6
         self._dof = dof
         self._arm_dof = 6
         self._gripper_dof = dof - self._arm_dof
@@ -373,13 +380,10 @@ class PiperAdapter(ManipulatorAdapter):
             raise RuntimeError("Failed to read joint positions")
 
         js = joint_msgs.joint_state
+        raw = [js.joint_1, js.joint_2, js.joint_3, js.joint_4, js.joint_5, js.joint_6]
         positions = [
-            js.joint_1 * MILLIDEG_TO_RAD,
-            js.joint_2 * MILLIDEG_TO_RAD,
-            js.joint_3 * MILLIDEG_TO_RAD,
-            js.joint_4 * MILLIDEG_TO_RAD,
-            js.joint_5 * MILLIDEG_TO_RAD,
-            js.joint_6 * MILLIDEG_TO_RAD,
+            value * MILLIDEG_TO_RAD + offset
+            for value, offset in zip(raw, self._joint_offsets, strict=True)
         ]
         if self._gripper_dof:
             positions.append(self._read_gripper())
@@ -469,7 +473,10 @@ class PiperAdapter(ManipulatorAdapter):
         arm, grip = positions[: self._arm_dof], positions[self._arm_dof :]
 
         # Convert radians to Piper units (0.001 degrees)
-        piper_joints = [round(rad * RAD_TO_MILLIDEG) for rad in arm]
+        piper_joints = [
+            round((rad - offset) * RAD_TO_MILLIDEG)
+            for rad, offset in zip(arm, self._joint_offsets, strict=True)
+        ]
 
         # Set speed rate if not full speed
         if velocity < 1.0:
@@ -538,10 +545,14 @@ class PiperAdapter(ManipulatorAdapter):
         deadline = time.monotonic() + SHUTDOWN_TIMEOUT
         while time.monotonic() < deadline:
             try:
-                if (
-                    max(abs(position) for position in self.read_joint_positions())
-                    <= SHUTDOWN_POSITION_TOLERANCE
-                ):
+                positions = self.read_joint_positions()
+                # The zero pose is the encoders' zero, so undo the offsets.
+                encoder = [
+                    position - offset
+                    for position, offset in zip(positions, self._joint_offsets, strict=False)
+                ]
+                encoder += positions[self._arm_dof :]
+                if max(abs(position) for position in encoder) <= SHUTDOWN_POSITION_TOLERANCE:
                     return True
             except Exception:
                 logger.exception("Failed to read Piper position during shutdown")
