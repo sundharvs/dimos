@@ -108,9 +108,12 @@ XARM_GRASP_FRAME_TO_TCP = (
 # resolves into world, and every cloud the camera produces is silently unusable.
 # link7 is a frame the model already publishes, so ManipulationModule emits the
 # whole chain from one loop at one rate.
+# Measured 2026-10-02 with xarm7-hand-eye-calibration's automatic collection:
+# 23 poses, board-in-base spread 2.9 mm / 0.74 deg RMS, four solvers within
+# 0.7 mm. Re-measure whenever the camera mount moves.
 XARM_WRIST_CAMERA_TRANSFORM = Transform(
-    translation=Vector3(x=0.06693724, y=-0.0309563, z=0.00691482),
-    rotation=Quaternion(0.70513398, 0.00535696, 0.70897578, -0.01052180),  # xyzw
+    translation=Vector3(x=0.06551144, y=-0.01758815, z=0.01386731),
+    rotation=Quaternion(0.64967965, 0.00241037, 0.76020428, -0.00002500),  # xyzw
     frame_id="link7",
     child_frame_id="camera_link",
 )
