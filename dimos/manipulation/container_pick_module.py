@@ -81,7 +81,6 @@ from dimos.manipulation.grasp_verification import (
 from dimos.manipulation.grasping.grasp_gen_spec import GraspGenSpec
 from dimos.manipulation.manipulation_spec import ManipulationSpec, PlanResult
 from dimos.manipulation.planning.spec.models import PlanningGroupID
-from dimos.manipulation.skill_errors import ManipulationSkillError
 from dimos.manipulation.wrist_tabletop_spec import WristTabletopSpec
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -419,7 +418,7 @@ class ContainerPickModule(Module):
     # skills
 
     @skill(uses=[CAP_MOVEMENT])
-    def survey(self) -> SkillResult[ManipulationSkillError]:
+    def survey(self) -> SkillResult:
         """Move the wrist camera to look straight down over the workspace.
 
         Goes above the last seen container when there is one, by straight-line
@@ -431,9 +430,7 @@ class ContainerPickModule(Module):
         return SkillResult.ok("At survey pose", tcp=self._tcp().tolist())
 
     @skill(uses=[CAP_MOVEMENT])
-    def pick_up_container(
-        self, prompt: str = "", turn_after_degrees: float = 0.0
-    ) -> SkillResult[ManipulationSkillError]:
+    def pick_up_container(self, prompt: str = "", turn_after_degrees: float = 0.0) -> SkillResult:
         """Scan for the container, grasp one of its side walls by the rim and lift it.
 
         Args:
@@ -458,7 +455,7 @@ class ContainerPickModule(Module):
         return self._pick(object_id, points, cloud, container, math.radians(turn_after_degrees))
 
     @skill(uses=[CAP_MOVEMENT])
-    def rotate_held_container(self, yaw_degrees: float) -> SkillResult[ManipulationSkillError]:
+    def rotate_held_container(self, yaw_degrees: float) -> SkillResult:
         """Turn the held container about the vertical axis with a guarded wrist move.
 
         Args:
@@ -474,7 +471,7 @@ class ContainerPickModule(Module):
     @skill(uses=[CAP_MOVEMENT])
     def place_container(
         self, x: float, y: float, opening_yaw_degrees: float | None = None
-    ) -> SkillResult[ManipulationSkillError]:
+    ) -> SkillResult:
         """Carry the held container to a spot, turn it so its opening faces a direction, set it down.
 
         Args:
@@ -533,9 +530,7 @@ class ContainerPickModule(Module):
         )
 
     @skill(uses=[CAP_MOVEMENT])
-    def set_down_container(
-        self, x: float | None = None, y: float | None = None
-    ) -> SkillResult[ManipulationSkillError]:
+    def set_down_container(self, x: float | None = None, y: float | None = None) -> SkillResult:
         """Lower the held container onto the surface it came from and let go cleanly.
 
         Args:
@@ -548,7 +543,7 @@ class ContainerPickModule(Module):
         return self.place_container(center[0] if x is None else x, center[1] if y is None else y)
 
     @skill(uses=[CAP_MOVEMENT])
-    def check_container_pose(self, prompt: str = "") -> SkillResult[ManipulationSkillError]:
+    def check_container_pose(self, prompt: str = "") -> SkillResult:
         """Look down at the container and report its centre, heading and opening direction.
 
         Args:
@@ -564,7 +559,7 @@ class ContainerPickModule(Module):
         return SkillResult.ok("Container seen", **container)
 
     @skill(uses=[CAP_MOVEMENT])
-    def map_slots(self) -> SkillResult[ManipulationSkillError]:
+    def map_slots(self) -> SkillResult:
         """Look at the tape slots on the table from the configured viewpoints and fit the grid."""
         if self._tabletop is None:
             return SkillResult.fail("INVALID_STATE", "No wrist tabletop module in the blueprint")
@@ -591,9 +586,7 @@ class ContainerPickModule(Module):
         )
 
     @skill(uses=[CAP_MOVEMENT])
-    def place_container_in_slot(
-        self, slot: str, prompt: str = ""
-    ) -> SkillResult[ManipulationSkillError]:
+    def place_container_in_slot(self, slot: str, prompt: str = "") -> SkillResult:
         """Pick up the container and place it inside a mapped tape slot, opening toward the arm.
 
         Verifies from above that the rim is inside the tape and the opening faces
@@ -678,7 +671,7 @@ class ContainerPickModule(Module):
 
     def _scan(
         self, prompts: list[str] | None
-    ) -> tuple[str, NDArray[np.float32], Any, dict[str, Any]] | SkillResult[ManipulationSkillError]:
+    ) -> tuple[str, NDArray[np.float32], Any, dict[str, Any]] | SkillResult:
         last_error = "nothing detected"
         for _attempt in range(self.config.scan_attempts):
             for object_id, cloud in self._candidate_clouds(prompts):
@@ -771,7 +764,7 @@ class ContainerPickModule(Module):
         cloud: Any,
         container: dict[str, Any],
         turn_after: float,
-    ) -> SkillResult[ManipulationSkillError]:
+    ) -> SkillResult:
         try:
             candidates = self._grasps.propose_grasps(cloud)
         except (RuntimeError, ValueError) as exc:
@@ -1046,9 +1039,7 @@ class ContainerPickModule(Module):
             np.asarray(self.config.survey_camera_offset, dtype=float), yaw - self.config.survey_yaw
         )
 
-    def _survey_over(
-        self, target_xy: NDArray[np.float64]
-    ) -> SkillResult[ManipulationSkillError] | None:
+    def _survey_over(self, target_xy: NDArray[np.float64]) -> SkillResult | None:
         """Put the wrist camera above target_xy at the survey height, tool pointing down."""
         config = self.config
         yaw = self._survey_yaw()
@@ -1069,9 +1060,7 @@ class ContainerPickModule(Module):
             logger.warning("Container pick: survey wrist yaw not restored; scanning as is")
         return None
 
-    def _cartesian_to(
-        self, target: NDArray[np.float64]
-    ) -> SkillResult[ManipulationSkillError] | None:
+    def _cartesian_to(self, target: NDArray[np.float64]) -> SkillResult | None:
         """Straight-line move, vertical leg first when going up, last when going down."""
         config = self.config
         if not inside(target, config.workspace_box):

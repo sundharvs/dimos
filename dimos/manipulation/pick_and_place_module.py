@@ -131,20 +131,14 @@ class PickAndPlaceModule(Module):
         return self._holding_object
 
     @rpc
-    def release(
-        self, planning_group: PlanningGroupID | None = None
-    ) -> SkillResult[ManipulationSkillError]:
+    def release(self, planning_group: PlanningGroupID | None = None) -> SkillResult:
         """Open the gripper where the arm is and forget the held object.
 
         For callers that lower the object themselves (e.g. a straight
         move_linear onto the surface it came from) when a planned place is
         rejected because the held object is mapped as an obstacle.
         """
-        group = self._resolve_group(planning_group)
-        if group is None:
-            return SkillResult.fail(
-                "ROBOT_NOT_FOUND", "Gripper-capable planning group is missing or ambiguous"
-            )
+        group = self._gripper_group(planning_group)
         failure = self._open_gripper(group, "release")
         self._holding_object = False
         self._clear_selection()
