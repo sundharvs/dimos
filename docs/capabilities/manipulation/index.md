@@ -503,6 +503,7 @@ planner is locked for its whole native call.
 | [`xarm-grasp`](/docs/capabilities/manipulation/xarm-grasp.md) | XArm7 grasping stack, on hardware or in MuJoCo |
 | `xarm-grasp-agent` | The grasping stack + LLM agent |
 | [`xarm7-hand-eye-calibration`](/docs/capabilities/manipulation/xarm-grasp.md#calibrating-the-wrist-camera) | XArm7 wrist-camera calibration against a ChArUco board |
+| [`xarm-grasp-bin`](/docs/capabilities/manipulation/container-pick.md) | Container (bin) pick by the rim with guarded motions; porting notes in [container pick on the Piper](/docs/capabilities/manipulation/porting-container-pick-piper.md) |
 | `xarm-perception-sim` | XArm7 simulation perception stack |
 | [`xarm-perception-sim-agent`](/docs/capabilities/manipulation/agentic.md) | XArm7 simulation perception stack + LLM agent |
 
