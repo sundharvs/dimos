@@ -493,6 +493,34 @@ def test_move_near_falls_through_to_the_next_reachable_candidate(
     assert result.metadata["x"] == pytest.approx(0.3)
 
 
+def test_move_near_never_plans_below_the_configured_floor(
+    module: PickAndPlaceModule,
+) -> None:
+    """A standoff computed below the table height is raised onto it."""
+    manipulation: Any = module._manipulation
+    module.config.near_min_z = 0.5
+
+    result = module.move_near("cup-1")
+
+    assert result.is_success()
+    assert result.metadata["min_z"] == pytest.approx(0.5)
+    (targets,), _ = manipulation.plan_to_poses.call_args
+    pose = targets["arm/tool"]
+    # The unclamped standoff would be z=0.35; x, y and orientation are kept.
+    assert pose.position.z == pytest.approx(0.5)
+    assert pose.position.x == pytest.approx(0.1)
+    assert pose.orientation.to_euler().x == pytest.approx(-3.141592653589793, abs=1e-6)
+
+
+def test_move_near_leaves_poses_above_the_floor_alone(module: PickAndPlaceModule) -> None:
+    manipulation: Any = module._manipulation
+    module.config.near_min_z = 0.1
+
+    assert module.move_near("cup-1").is_success()
+    (targets,), _ = manipulation.plan_to_poses.call_args
+    assert targets["arm/tool"].position.z == pytest.approx(0.35)
+
+
 def test_move_near_reports_unknown_objects(module: PickAndPlaceModule) -> None:
     result = module.move_near("nope")
 

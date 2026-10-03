@@ -77,6 +77,10 @@ XARM_GRASP_SCAN_JOINTS = [0.0, -0.04609, 0.0, 1.83940, 0.0, 1.87106, 0.0]
 # was mapped.
 XARM_GRASP_VOXEL_SIZE = 0.025
 
+# World-frame tool height measured with the gripper pointing down and the
+# fingertips resting on the table (2026-10-02). move_near never plans below it.
+XARM_GRASP_NEAR_MIN_Z = -0.012
+
 XARM_GRASP_PROMPTS = [
     "black bottle",
     "gray can",
@@ -250,7 +254,11 @@ _XARM_GRASP_STACK = (
         voxel_map_resolution=XARM_GRASP_VOXEL_SIZE,
     ),
     ManipulationSkills.blueprint(),
-    PickAndPlaceModule.blueprint(planning_frame="world"),
+    PickAndPlaceModule.blueprint(
+        planning_frame="world",
+        # The sim scene's table is not at the hardware table's height.
+        near_min_z=None if SIMULATED else XARM_GRASP_NEAR_MIN_Z,
+    ),
     *_sensing(),
     _scene_registration(),
     *_voxel_mapping(),

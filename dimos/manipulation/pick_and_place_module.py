@@ -53,6 +53,10 @@ class PickAndPlaceModuleConfig(ModuleConfig):
     # move_near's default standoff. Further out than the pre-grasp so the open
     # fingers stay clear of the object and whatever it rests on.
     near_offset: float = Field(default=0.15, gt=0.0)
+    # Floor for move_near's standoff height in the planning frame, e.g. the
+    # measured tool height with the fingertips on the table. A standoff that
+    # lands below it is raised to it; None disables the floor.
+    near_min_z: float | None = None
     grasp_verification: GraspVerificationConfig = Field(default_factory=GraspVerificationConfig)
 
 
@@ -180,7 +184,8 @@ class PickAndPlaceModule(Module):
 
         Plans to the best grasp backed off along its approach axis, further out
         than pick_object's pre-grasp, with the yaw aligned to that grasp. The
-        gripper is left as it is and nothing is picked.
+        standoff never goes below the configured minimum height. The gripper is
+        left as it is and nothing is picked.
 
         Args:
             object_id: Exact object ID returned by the latest scan_objects call.
@@ -205,7 +210,7 @@ class PickAndPlaceModule(Module):
                 ),
                 group,
             )
-            near = self._offset_pose(grasp, standoff)
+            near = self._floor_pose(self._offset_pose(grasp, standoff))
             failure = self._move(near, group)
             if failure is not None:
                 if failure.error_code != "PLANNING_FAILED":
@@ -218,6 +223,7 @@ class PickAndPlaceModule(Module):
                 rank=rank,
                 score=candidate.score,
                 standoff=standoff,
+                min_z=self.config.near_min_z,
                 x=near.position.x,
                 y=near.position.y,
                 z=near.position.z,
@@ -329,6 +335,18 @@ class PickAndPlaceModule(Module):
             frame_id=pose.frame_id,
             position=pose.position,
             orientation=Quaternion.from_euler(Vector3(euler.x, euler.y, current_euler.z)),
+        )
+
+    def _floor_pose(self, pose: PoseStamped) -> PoseStamped:
+        """Raise a pose to the configured minimum height, if it has one."""
+        floor = self.config.near_min_z
+        if floor is None or pose.position.z >= floor:
+            return pose
+        return PoseStamped(
+            ts=pose.ts,
+            frame_id=pose.frame_id,
+            position=Vector3(pose.position.x, pose.position.y, floor),
+            orientation=pose.orientation,
         )
 
     @staticmethod
