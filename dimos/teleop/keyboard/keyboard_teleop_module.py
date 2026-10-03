@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -43,10 +44,13 @@ except ImportError:
 if TYPE_CHECKING:
     from pygame.key import _ScancodeWrapper
 
+from pydantic import Field
+
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import Out
+from dimos.core.stream import In, Out
+from dimos.imitation.collection.episode_monitor import EpisodeStatus, KeyPress
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.utils.logging_config import setup_logger
@@ -66,6 +70,10 @@ TwistVector = tuple[float, float, float]
 class KeyboardTeleopConfig(ModuleConfig):
     linear_speed: float = DEFAULT_LINEAR_SPEED
     angular_speed: float = DEFAULT_ANGULAR_SPEED
+    # Extra (key, description) help lines for bindings handled elsewhere, e.g.
+    # the episode keys an EpisodeMonitorModule maps onto this module's
+    # `keyboard` output.
+    extra_controls: list[tuple[str, str]] = Field(default_factory=list)
 
 
 def _motion_key_codes() -> frozenset[int]:
@@ -99,13 +107,17 @@ def _gripper_key_codes() -> tuple[int, int]:
 class KeyboardTeleopModule(Module):
     """Pygame-based spatial EEF twist keyboard teleop as a DimOS Module.
 
-    Publishes routed TwistStamped commands for EEFTwistTask.
+    Publishes routed TwistStamped commands for EEFTwistTask. Every key press
+    also goes out as a KeyPress, so an EpisodeMonitorModule can bind episode
+    start/save/discard to keys; its status, when wired, is shown in the window.
     """
 
     config: KeyboardTeleopConfig
 
     ee_twist_command: Out[TwistStamped]
     gripper_command: Out[Float32]
+    keyboard: Out[KeyPress]
+    status: In[EpisodeStatus]
 
     _stop_event: threading.Event
     _thread: threading.Thread | None = None
@@ -115,6 +127,7 @@ class KeyboardTeleopModule(Module):
         super().__init__(**kwargs)
         self._stop_event = threading.Event()
         self._gripper_opening = None
+        self._episode_status: EpisodeStatus | None = None
 
     @rpc
     def start(self) -> None:
@@ -123,6 +136,10 @@ class KeyboardTeleopModule(Module):
                 "pygame is required for keyboard teleop. Install it with: pip install pygame"
             )
         super().start()
+        # Only blueprints with an episode monitor wire `status`; the plain
+        # teleop blueprints leave it unbound.
+        if self.status.connection is not None or self.status._transport is not None:
+            self.status.subscribe(self._on_episode_status)
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._pygame_loop, daemon=True)
         self._thread.start()
@@ -179,6 +196,16 @@ class KeyboardTeleopModule(Module):
             screen.blit(font.render(angular_text, True, (100, 200, 255)), (20, y_pos))
             y_pos += 40
 
+            status = self._episode_status
+            if status is not None:
+                if status.state == "recording":
+                    rec_text, rec_color = "● RECORDING", (255, 80, 80)
+                else:
+                    rec_text, rec_color = "○ not recording", (160, 160, 160)
+                counts = f"   saved {status.episodes_saved}   discarded {status.episodes_discarded}"
+                screen.blit(font.render(rec_text + counts, True, rec_color), (20, y_pos))
+                y_pos += 40
+
             controls = [
                 ("W/S", "+X/-X (forward/back)"),
                 ("A/D", "+Y/-Y (left/right)"),
@@ -187,6 +214,7 @@ class KeyboardTeleopModule(Module):
                 ("T/G", "+Pitch/-Pitch"),
                 ("Y/H", "+Yaw/-Yaw"),
                 ("[/]", "Open/close gripper"),
+                *self.config.extra_controls,
                 ("ESC", "Quit"),
             ]
             for key, desc in controls:
@@ -210,6 +238,7 @@ class KeyboardTeleopModule(Module):
         if event.type == pygame.QUIT:
             return True
         if event.type == pygame.KEYDOWN:
+            self.keyboard.publish(KeyPress(key=pygame.key.name(event.key), ts=time.time()))
             if event.key == pygame.K_ESCAPE:
                 return True
             left_bracket, right_bracket = _gripper_key_codes()
@@ -236,6 +265,9 @@ class KeyboardTeleopModule(Module):
         angular: TwistVector = (0.0, 0.0, 0.0),
     ) -> None:
         self.ee_twist_command.publish(TwistStamped(linear=list(linear), angular=list(angular)))
+
+    def _on_episode_status(self, status: EpisodeStatus) -> None:
+        self._episode_status = status
 
     def _publish_gripper_command(self, *, opening: float) -> None:
         """Publish a changed normalized gripper opening."""

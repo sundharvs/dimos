@@ -18,6 +18,7 @@
 ``dimos run xarm-grasp-graspgenx --xarm7-ip ...`` learned grasps
 ``dimos run xarm-grasp-keyboard --xarm7-ip ...``  heuristic grasps + keyboard jog
 ``dimos run xarm-grasp-graspgenx-keyboard --xarm7-ip ...``  learned grasps + keyboard jog
+``dimos run xarm-grasp-keyboard-collect --xarm7-ip ...``  + episode recording for IL
 ``dimos run xarm-grasp --simulation mujoco``      the same stack in MuJoCo
 
 Only the grasp provider separates the two blueprints. The arm-versus-sim split is
@@ -29,10 +30,16 @@ coordinator, pick-and-place, scene registration -- is the same stack either way.
 
 from __future__ import annotations
 
+from datetime import datetime
+
+from dimos.constants import RECORDINGS_DIR
 from dimos.control.coordinator import TaskConfig
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.core.global_config import global_config
+from dimos.core.stream import In
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
+from dimos.imitation.collection.episode_monitor import EpisodeMonitorModule
+from dimos.imitation.collection.recorder import CollectionRecorder
 from dimos.manipulation.grasping.grasp_gen_x.module import GraspGenXModule
 from dimos.manipulation.grasping.heuristic_grasp import HeuristicGraspModule
 from dimos.manipulation.manipulation_module import ManipulationModule
@@ -43,7 +50,10 @@ from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.perception.experimental.object_scene_registration import ObjectSceneRegistrationModule
 from dimos.robot.manipulators.common.blueprints import (
     coordinator,
@@ -295,28 +305,30 @@ xarm_grasp = autoconnect(*_XARM_GRASP_MODULES, HeuristicGraspModule.blueprint())
 # it above would preempt every planned motion.
 XARM_GRASP_TELEOP_PRIORITY = 5
 
+# The eef_twist card binds the ee_twist_command input, which only this
+# subclass declares. Keep the instance name so RPC clients still find it.
+_XARM_GRASP_KEYBOARD_COORDINATOR = coordinator(
+    cls=ArmTwistCoordinator,
+    instance_name="ControlCoordinator",
+    hardware=[_hardware],
+    tasks=[
+        *_XARM_GRASP_TASKS,
+        eef_twist_task(
+            _hardware,
+            # Arm joints only: the IK must not claim the gripper joint.
+            robot_model=make_xarm7_model_config(add_gripper=False),
+            target_frame="link7",
+            priority=XARM_GRASP_TELEOP_PRIORITY,
+            # The keyboard publishes a zero twist on key release, so no
+            # command timeout is needed to stop the arm.
+            timeout=0.0,
+        ),
+    ],
+)
+
 _XARM_GRASP_KEYBOARD_MODULES = (
     *_XARM_GRASP_STACK,
-    # The eef_twist card binds the ee_twist_command input, which only this
-    # subclass declares. Keep the instance name so RPC clients still find it.
-    coordinator(
-        cls=ArmTwistCoordinator,
-        instance_name="ControlCoordinator",
-        hardware=[_hardware],
-        tasks=[
-            *_XARM_GRASP_TASKS,
-            eef_twist_task(
-                _hardware,
-                # Arm joints only: the IK must not claim the gripper joint.
-                robot_model=make_xarm7_model_config(add_gripper=False),
-                target_frame="link7",
-                priority=XARM_GRASP_TELEOP_PRIORITY,
-                # The keyboard publishes a zero twist on key release, so no
-                # command timeout is needed to stop the arm.
-                timeout=0.0,
-            ),
-        ],
-    ),
+    _XARM_GRASP_KEYBOARD_COORDINATOR,
     KeyboardTeleopModule.blueprint(),
 )
 
@@ -337,5 +349,69 @@ xarm_grasp_graspgenx = autoconnect(
     GraspGenXModule.blueprint(
         gripper=XARM_GRIPPER_SWEEP_VOLUME,
         grasp_frame_to_tcp=XARM_GRASP_FRAME_TO_TCP,
+    ),
+).remappings(_REMAPPINGS)
+
+
+# --- Demonstration recording ------------------------------------------------
+#
+# ``xarm-grasp-keyboard-collect`` adds the imitation-learning collection pair to
+# the keyboard stack: EpisodeMonitorModule segments episodes from key presses
+# and the recorder captures what DataPrep consumes. Afterwards:
+#
+#   dimos dataprep build -s recordings/session_xarm7_grasp_<ts>.db \
+#       -c dimos/robot/manipulators/xarm/blueprints/dataprep_xarm_grasp.json
+#
+# writes a LeRobot v3 dataset ready for ``lerobot-train --policy.type=act``.
+
+# pygame key names, as KeyboardTeleopModule publishes them.
+XARM_GRASP_EPISODE_KEYS = {"toggle": "space", "discard": "backspace"}
+XARM_GRASP_EPISODE_HELP = [
+    ("SPACE", "Start / save episode"),
+    ("BACKSPACE", "Discard episode"),
+]
+
+
+class XArmGraspCollectionRecorder(CollectionRecorder):
+    """CollectionRecorder plus the operator's commands and the depth image.
+
+    ``coordinator_joint_state`` alone yields only a next-state action; the twist
+    and gripper commands are what the operator actually did, and depth lets a
+    policy be trained with it later without re-collecting.
+    """
+
+    dedicated_worker = True
+
+    ee_twist_command: In[TwistStamped]
+    gripper_command: In[Float32]
+    depth_image: In[Image]
+
+
+def _grasp_session_db() -> str:
+    return str(RECORDINGS_DIR / f"session_xarm7_grasp_{datetime.now():%Y%m%d_%H%M%S}.db")
+
+
+xarm_grasp_keyboard_collect = autoconnect(
+    *_XARM_GRASP_STACK,
+    _XARM_GRASP_KEYBOARD_COORDINATOR,
+    KeyboardTeleopModule.blueprint(extra_controls=XARM_GRASP_EPISODE_HELP),
+    HeuristicGraspModule.blueprint(),
+    EpisodeMonitorModule.blueprint(
+        keyboard_map=XARM_GRASP_EPISODE_KEYS,
+        default_task_label="xarm7 grasp",
+    ),
+    XArmGraspCollectionRecorder.blueprint(
+        db_path=_grasp_session_db(),
+        poseless_streams=[
+            "color_image",
+            "depth_image",
+            "coordinator_joint_state",
+            "ee_twist_command",
+            "gripper_command",
+            "status",
+        ],
+        record_tf=False,
+        # Depth must stay lossless; the default image codec is JPEG.
+        stream_codecs={"depth_image": "lz4+lcm"},
     ),
 ).remappings(_REMAPPINGS)

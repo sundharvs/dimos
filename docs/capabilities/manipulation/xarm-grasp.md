@@ -175,3 +175,46 @@ its category silhouette in the wrist camera's top-down view.
 A failed grasp knocks free-body targets out of place, and `MujocoSimModule.reset()`
 does not respawn them. Restart the blueprint between pick attempts that need a
 pristine scene.
+
+## Recording demonstrations
+
+`xarm-grasp-keyboard-collect` is the keyboard stack plus the imitation-learning
+collection pair from `dimos/imitation/`: an `EpisodeMonitorModule` that segments
+episodes from key presses, and a recorder that captures the colour and depth
+images, the coordinator joint state, the operator's twist and gripper commands
+and the episode markers into one session database.
+
+```bash
+dimos run xarm-grasp-keyboard-collect --xarm7-ip 192.168.1.x
+```
+
+Recording is continuous for the run; the keys only mark episodes. In the
+"Keyboard Teleop" window:
+
+| Key | Action |
+| --- | --- |
+| `SPACE` | Start an episode; press again to save it |
+| `BACKSPACE` | Discard the episode in progress |
+
+The window shows `● RECORDING` with the saved and discarded counts while an
+episode is open. Picks and `move_near` calls issued from `dimos shell` during an
+episode are recorded like any other motion. Sessions land in
+`recordings/session_xarm7_grasp_<timestamp>.db` (or
+`~/.local/state/dimos/recordings/` for an installed dimOS).
+
+Export a LeRobot v3 dataset for ACT with the bundled config, after pointing its
+`source` at the session:
+
+```bash
+dimos dataprep build -s recordings/session_xarm7_grasp_<timestamp>.db \
+  -c dimos/robot/manipulators/xarm/blueprints/dataprep_xarm_grasp.json
+dimos dataprep inspect data/datasets/xarm7_grasp
+```
+
+The config uses the colour image at 15 Hz as the anchor, the 8-D joint state
+(seven joints plus gripper) as `observation.state`, and the next joint state as
+`action`. The twist and gripper commands are in the database too for a config
+that trains on commanded actions instead. Train with LeRobot (`lerobot-train
+--policy.type=act`) and run the checkpoint with `LeRobotPolicyModule`
+(`dimos/imitation/policy/lerobot/README.md`); its trajectory execution needs the
+coordinator's trajectory task, which this stack already has.

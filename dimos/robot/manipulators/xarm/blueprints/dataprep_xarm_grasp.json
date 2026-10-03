@@ -1,0 +1,37 @@
+{
+  "source": "recordings/session_xarm7_grasp_REPLACE_ME.db",
+  "episodes": {
+    "extractor": "episode_status",
+    "status_stream": "status"
+  },
+  "observation": {
+    "image": {
+      "stream": "color_image",
+      "field": "data"
+    },
+    "joint_state": {
+      "stream": "coordinator_joint_state",
+      "field": "position"
+    }
+  },
+  "action": {
+    "joint_target": {
+      "stream": "coordinator_joint_state",
+      "field": "position"
+    }
+  },
+  "sync": {
+    "anchor": "image",
+    "rate_hz": 15.0,
+    "tolerance_ms": 80.0,
+    "action_shift": 1
+  },
+  "output": {
+    "format": "lerobot",
+    "path": "data/datasets/xarm7_grasp",
+    "metadata": {
+      "robot": "xarm7",
+      "default_task_label": "xarm7 grasp"
+    }
+  }
+}
