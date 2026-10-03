@@ -133,9 +133,15 @@ XARM_GRASP_FRAME_TO_TCP = (
 # resolves into world, and every cloud the camera produces is silently unusable.
 # link7 is a frame the model already publishes, so ManipulationModule emits the
 # whole chain from one loop at one rate.
+#
+# Measured 2026-10-03 on the real arm (192.168.1.197): 58 still-arm captures of a
+# 5x7 ChArUco board (33.0 mm printed squares) at 1280x720, AX=XB over all five
+# OpenCV solvers against URDF forward kinematics of link7, board-in-base spread
+# 2.7 mm / 0.6 deg RMS (the previous value gave 14 mm). The offset along the
+# camera's optical axis is the least constrained direction, about +-4 mm.
 XARM_WRIST_CAMERA_TRANSFORM = Transform(
-    translation=Vector3(x=0.06693724, y=-0.0309563, z=0.00691482),
-    rotation=Quaternion(0.70513398, 0.00535696, 0.70897578, -0.01052180),  # xyzw
+    translation=Vector3(x=0.06865142, y=-0.01899432, z=0.02597990),
+    rotation=Quaternion(0.71878005, 0.00373539, 0.69521878, 0.00348488),  # xyzw
     frame_id="link7",
     child_frame_id="camera_link",
 )
