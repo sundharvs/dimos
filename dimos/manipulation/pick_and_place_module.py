@@ -117,6 +117,39 @@ class PickAndPlaceModule(Module):
     def get_object(self, object_id: str) -> dict[str, Any] | None:
         return self._objects.get(object_id)
 
+    @rpc
+    def set_grasp_verification(self, **fields: Any) -> dict[str, Any]:
+        """Update gripper feedback thresholds in place, e.g. ``empty_epsilon`` for
+        thin-walled objects whose held readback sits close to the empty close."""
+        current = self.config.grasp_verification.model_dump()
+        current.update(fields)
+        self.config.grasp_verification = GraspVerificationConfig(**current)
+        return self.config.grasp_verification.model_dump()
+
+    @rpc
+    def holding(self) -> bool:
+        return self._holding_object
+
+    @rpc
+    def release(
+        self, planning_group: PlanningGroupID | None = None
+    ) -> SkillResult[ManipulationSkillError]:
+        """Open the gripper where the arm is and forget the held object.
+
+        For callers that lower the object themselves (e.g. a straight
+        move_linear onto the surface it came from) when a planned place is
+        rejected because the held object is mapped as an obstacle.
+        """
+        group = self._resolve_group(planning_group)
+        if group is None:
+            return SkillResult.fail(
+                "ROBOT_NOT_FOUND", "Gripper-capable planning group is missing or ambiguous"
+            )
+        failure = self._open_gripper(group, "release")
+        self._holding_object = False
+        self._clear_selection()
+        return failure or SkillResult.ok("Released")
+
     @skill(uses=[CAP_MOVEMENT])
     def pick_object(
         self, object_id: str, planning_group: PlanningGroupID | None = None

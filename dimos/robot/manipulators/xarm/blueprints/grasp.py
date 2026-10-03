@@ -31,8 +31,10 @@ from dimos.control.coordinator import TaskConfig
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.core.global_config import global_config
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
+from dimos.manipulation.container_pick_module import ContainerPickModule
 from dimos.manipulation.grasping.grasp_gen_x.module import GraspGenXModule
 from dimos.manipulation.grasping.heuristic_grasp import HeuristicGraspModule
+from dimos.manipulation.grasping.rim_grasp import RimGraspModule
 from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.manipulation.manipulation_skills import ManipulationSkills
 from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
@@ -68,6 +70,16 @@ XARM_GRASP_SCAN_JOINTS = [0.0, -0.04609, 0.0, 1.83940, 0.0, 1.87106, 0.0]
 # cells the map does not hold, and a mismatched octree does not line up with what
 # was mapped.
 XARM_GRASP_VOXEL_SIZE = 0.025
+
+# TCP floor for the container pick: the operator hand-guided the fingertips to a
+# safe height above the table on 2026-10-03 and this is where the model put them.
+XARM_CONTAINER_MIN_Z = -0.0085
+# Workspace the container pick may use on this table (planning frame = link_base).
+# The hand box ends 10 cm behind the base; the elbow box allows the fold-back of
+# the upper arm when the hand is out over the table. Set the xArm's own TCP
+# boundary in the controller (SDK set_reduced_tcp_boundary) as the first line.
+XARM_CONTAINER_HAND_BOX = ((-0.42, 0.42), (-0.78, 0.10), (-0.03, 0.80))
+XARM_CONTAINER_ELBOW_BOX = ((-0.45, 0.45), (-0.78, 0.30), (-0.03, 0.88))
 
 XARM_GRASP_PROMPTS = [
     "black bottle",
@@ -218,6 +230,9 @@ def _voxel_mapping() -> tuple[Blueprint, ...]:
             # while scanning, so a transform a period old describes the same pose.
             tf_tolerance_s=0.1,
             tf_forward_tolerance_s=0.1,
+            # The base plate sits on the table: cells mapped around it collide
+            # with link_base and leave every start configuration "in collision".
+            base_exclusion_radius=0.17,
         ),
         # Tabletop reach, not a room-scale lidar sweep.
         RayTracingVoxelMap.blueprint(
@@ -269,6 +284,30 @@ _XARM_GRASP_MODULES = (
 xarm_grasp = autoconnect(*_XARM_GRASP_MODULES, HeuristicGraspModule.blueprint()).remappings(
     _REMAPPINGS
 )
+
+# ``xarm-grasp-bin``: rim grasps for open containers (bins, boxes) that a centroid
+# grasp cannot hold, and the guarded ContainerPickModule skills on top of them
+# (pick_up_container / set_down_container / rotate_held_container). Both modules'
+# parameters are RPC-settable so an outer research loop can tune them live.
+xarm_grasp_bin = autoconnect(
+    *_XARM_GRASP_MODULES,
+    RimGraspModule.blueprint(min_z=None if SIMULATED else XARM_CONTAINER_MIN_Z),
+    ContainerPickModule.blueprint(
+        model=_model.model,
+        planning_frame="world",
+        min_z=None if SIMULATED else XARM_CONTAINER_MIN_Z,
+        hand_links=["link7", "link_tcp"],
+        elbow_links=["link4", "link5"],
+        workspace_box=XARM_CONTAINER_HAND_BOX,
+        elbow_box=XARM_CONTAINER_ELBOW_BOX,
+        wrist_joint="joint7",
+        prompts=["yellow bin", "bin"],
+        # The shelf bin the skill was learned on: 28 x 10 cm rim, so a fit much
+        # shorter than that is a partial segmentation, not a smaller bin.
+        container_long_min=0.24,
+        container_short_range=(0.07, 0.14),
+    ),
+).remappings(_REMAPPINGS)
 
 xarm_grasp_graspgenx = autoconnect(
     *_XARM_GRASP_MODULES,
