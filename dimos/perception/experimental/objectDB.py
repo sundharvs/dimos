@@ -46,11 +46,13 @@ class ObjectDB:
         min_detections_for_permanent: int = 6,
         pending_ttl_s: float = 5.0,
         track_id_ttl_s: float = 5.0,
+        accumulate_pointclouds: bool = True,
     ) -> None:
         self._distance_threshold = distance_threshold
         self._min_detections = min_detections_for_permanent
         self._pending_ttl_s = pending_ttl_s
         self._track_id_ttl_s = track_id_ttl_s
+        self._accumulate_pointclouds = accumulate_pointclouds
 
         # Internal storage - keyed by object_id
         self._pending_objects: dict[str, Object] = {}
@@ -237,7 +239,7 @@ class ObjectDB:
         if existing.ts == obj.ts:
             return False
 
-        existing.update_object(obj)
+        existing.update_object(obj, accumulate_pointcloud=self._accumulate_pointclouds)
         existing.ts = obj.ts or now
         existing.last_seen_ts = now
         return True

@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+import time
 from typing import Any, Literal
 
 from pydantic import Field
@@ -42,6 +44,46 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.manipulation_msgs.GraspCandidateArray import GraspCandidateArray
 from dimos.perception.experimental.object_scene_registration_spec import ObjectSceneRegistrationSpec
 
+# How often the joints are read while waiting for the arm to stop, and how many
+# unchanged readings in a row count as stopped.
+_SETTLE_POLL_INTERVAL = 0.05
+_SETTLE_SAMPLES = 3
+
+
+def await_arm_settle(
+    read: Callable[[], Sequence[float] | None],
+    tolerance: float,
+    timeout: float,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Poll joint positions until they stop changing, or the deadline passes.
+
+    A blocking move returns once its last command has gone out. An arm that
+    trails its commands is still short of the target at that moment, and only
+    its readback says when it has arrived. ``sleep`` and ``clock`` are
+    injectable for tests.
+    """
+    deadline = clock() + timeout
+    last = read()
+    still = 0
+    while still < _SETTLE_SAMPLES:
+        if clock() >= deadline:
+            return False
+        sleep(_SETTLE_POLL_INTERVAL)
+        positions = read()
+        if (
+            last is not None
+            and positions is not None
+            and all(abs(a - b) <= tolerance for a, b in zip(positions, last, strict=True))
+        ):
+            still += 1
+        else:
+            still = 0
+        last = positions
+    return True
+
 
 class PickAndPlaceModuleConfig(ModuleConfig):
     planning_frame: str = "base_link"
@@ -57,6 +99,19 @@ class PickAndPlaceModuleConfig(ModuleConfig):
     # measured tool height with the fingertips on the table. A standoff that
     # lands below it is raised to it; None disables the floor.
     near_min_z: float | None = None
+    # Lowest planning-frame height place_at accepts as an explicit z. The last
+    # leg of a place is not collision checked, so a z under the support surface
+    # would press the fingers and the held object into it.
+    min_place_z: float | None = None
+    # The straight legs are measured from where the arm is, so each one first
+    # waits for the joints to stop: at most settle_timeout, until none moves
+    # more than settle_tolerance (radians) between readings.
+    settle_timeout: float = Field(default=1.0, ge=0.0)
+    settle_tolerance: float = Field(default=0.001, gt=0.0)
+    # How far the settled arm may be from where the previous move should have
+    # left it. Beyond this the move did not happen, and an unchecked straight
+    # line from wherever the arm is would not be the short leg that was planned.
+    leg_start_tolerance: float = Field(default=0.02, gt=0.0)
     grasp_verification: GraspVerificationConfig = Field(default_factory=GraspVerificationConfig)
 
 
@@ -333,19 +388,30 @@ class PickAndPlaceModule(Module):
         self,
         x: float,
         y: float,
-        z: float,
+        z: float | None = None,
         planning_group: PlanningGroupID | None = None,
     ) -> SkillResult[ManipulationSkillError]:
-        """Place the held object at an explicit planning-frame position.
+        """Place the held object at a planning-frame position.
 
         Args:
             x: Planning-frame X coordinate in meters.
             y: Planning-frame Y coordinate in meters.
-            z: Planning-frame Z coordinate in meters.
+            z: Planning-frame Z coordinate in meters. Omit to set the object down
+                at the height it was picked from.
             planning_group: Gripper-capable pose group; omitted only when unambiguous.
         """
         if self._selected_grasp is None or not self._holding_object:
             return SkillResult.fail("INVALID_STATE", "Pick an object before placing")
+        if z is None:
+            # The object left its support with the tip at the grasp height, so
+            # the same height sets it back down on a surface at that level.
+            z = self._selected_grasp.position.z
+        elif self.config.min_place_z is not None and z < self.config.min_place_z:
+            return SkillResult.fail(
+                "INVALID_INPUT",
+                f"z={z:.3f} is below the lowest place height {self.config.min_place_z:.3f}; "
+                "omit z to place at the height the object was picked from",
+            )
         group = self._resolve_group(planning_group)
         if group is None:
             return SkillResult.fail(
@@ -427,11 +493,25 @@ class PickAndPlaceModule(Module):
         The object being grasped is itself mapped geometry once a voxel map feeds
         the planner, so a collision-checked plan into it can only ever be
         rejected. This leg is short, straight, and deliberately ends in contact.
+
+        The line is a displacement from wherever the arm is, so it is measured
+        from the arm's settled pose rather than from ``start``: whatever the
+        previous move fell short by would otherwise be carried to ``end``.
         """
+        origin = start
+        settled = self._settled_tip(planning_group)
+        if settled is not None and settled.frame_id == start.frame_id:
+            error = (settled.position - start.position).length()
+            if error > self.config.leg_start_tolerance:
+                return SkillResult.fail(
+                    "EXECUTION_FAILED",
+                    f"Arm is {error * 1000:.0f} mm from where the last move should have left it",
+                )
+            origin = settled
         result = self._manipulation.move_linear(
-            end.position.x - start.position.x,
-            end.position.y - start.position.y,
-            end.position.z - start.position.z,
+            end.position.x - origin.position.x,
+            end.position.y - origin.position.y,
+            end.position.z - origin.position.z,
             planning_group,
             check_collision=False,
         )
@@ -443,6 +523,22 @@ class PickAndPlaceModule(Module):
             message = "" if result.execution is None else result.execution.message
             return SkillResult.fail("EXECUTION_FAILED", message)
         return None
+
+    def _settled_tip(self, planning_group: PlanningGroupID) -> PoseStamped | None:
+        """Where the tip is once the arm has stopped moving, if the state reports it."""
+        await_arm_settle(
+            lambda: self._joint_positions(planning_group),
+            self.config.settle_tolerance,
+            self.config.settle_timeout,
+        )
+        state = self._manipulation.get_state().groups.get(planning_group)
+        return state.end_effector_pose if state is not None else None
+
+    def _joint_positions(self, planning_group: PlanningGroupID) -> Sequence[float] | None:
+        state = self._manipulation.get_state().groups.get(planning_group)
+        if state is None or state.joints is None:
+            return None
+        return state.joints.position
 
     def _move(
         self, pose: PoseStamped, planning_group: PlanningGroupID

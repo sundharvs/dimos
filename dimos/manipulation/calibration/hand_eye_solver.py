@@ -12,27 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Eye-in-hand calibration: where the wrist camera sits on the gripper.
+"""Hand-eye calibration: where a camera sits relative to the arm.
 
-WHAT IS SOLVED
-    The camera rides on the gripper and the board is fixed in the workspace.
-    Write the board's pose in the base frame through the arm and the camera:
+TWO ARRANGEMENTS, ONE EQUATION
+    Eye-in-hand -- the camera rides on the gripper, the board is fixed in the
+    workspace. The board's base-frame pose, through the arm and the camera,
 
         T_base_board = T_base_gripper . T_gripper_cam . T_cam_board
 
-    With A_i = T_base_gripper from the arm and B_i = T_cam_board from the
-    detector, the unknown mount X = T_gripper_cam must make every
-    A_i . X . B_i the same matrix, because the board does not move. Pairs of
-    poses give A_ij . X = X . B_ij, which is what OpenCV's calibrateHandEye
-    solves directly for this (eye-in-hand) arrangement. Feeding it inverted arm
-    poses -- the eye-to-hand substitution -- returns a plausible transform that
-    is wrong everywhere.
+    must be the same at every pose, so X = T_gripper_cam is the unknown.
 
-JUDGE IT BY THE SPREAD OF THE BOARD, NOT BY REPROJECTION
+    Eye-to-hand -- the camera is fixed, the board rides on the gripper. Now the
+    board's pose on the gripper is the constant:
+
+        T_gripper_board = T_base_gripper^-1 . T_base_cam . T_cam_board
+
+    which is the same equation with the arm pose inverted and X = T_base_cam.
+    `solve()` makes that substitution; OpenCV's calibrateHandEye is written for
+    eye-in-hand. Getting the mode backwards returns a plausible transform that
+    is wrong everywhere -- the residual below is what catches it.
+
+JUDGE IT BY THE SPREAD OF THE CONSTANT, NOT BY REPROJECTION
     A board can reproject beautifully and still disagree with the arm. Once X is
-    known, T_base_board is recoverable from every pose, and every one must agree.
-    The spread is a physical error in millimetres and degrees that shares no
-    assumption with the solver. `residuals()` reports it.
+    known, the constant (board in base, or board on gripper) is recoverable from
+    every pose, and every one must agree. The spread is a physical error in
+    millimetres and degrees that shares no assumption with the solver.
 
 ROTATION DIVERSITY IS A REQUIREMENT
     AX = XB determines X only if the wrist rotates about axes that are not all
@@ -47,12 +51,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 import itertools
+from typing import Literal
 
 import cv2
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 Matrix4 = NDArray[np.float64]
+HandEyeMode = Literal["eye_in_hand", "eye_to_hand"]
 
 METHODS = ("TSAI", "PARK", "HORAUD", "ANDREFF", "DANIILIDIS")
 MIN_POSES = 3
@@ -60,6 +66,10 @@ MIN_POSES = 3
 MIN_AXIS_SPREAD = 0.15
 # Above this the set is well spread; between the two, more axes still help.
 GOOD_AXIS_SPREAD = 0.4
+# A solver whose spread exceeds the best one's by both of these has failed on
+# the data rather than disagreed about it.
+OUTLIER_SPREAD_RATIO = 1.5
+OUTLIER_SPREAD_MARGIN_MM = 1.0
 
 
 def make_T(rotation: ArrayLike, translation: ArrayLike) -> Matrix4:
@@ -105,10 +115,11 @@ def axis_spread(base_T_gripper: Sequence[Matrix4]) -> float:
 
 @dataclass(frozen=True)
 class Residual:
-    """How much the board's recovered base-frame pose disagrees with itself."""
+    """How much the recovered constant pose disagrees with itself across samples."""
 
-    pos_mm: NDArray[np.float64]  # per-pose distance from the median board position
+    pos_mm: NDArray[np.float64]  # per-pose distance from the median sample
     rot_deg: NDArray[np.float64]
+    label: str = "board-in-base"
 
     @property
     def n(self) -> int:
@@ -124,19 +135,27 @@ class Residual:
 
     def describe(self) -> str:
         return (
-            f"board-in-base spread over {self.n} poses: "
+            f"{self.label} spread over {self.n} poses: "
             f"{self.pos_rms:.2f} mm RMS (max {self.pos_mm.max():.2f}), "
             f"{self.rot_rms:.2f} deg RMS (max {self.rot_deg.max():.2f})"
         )
 
 
-def boards_in_base(
-    gripper_T_cam: Matrix4,
+def _solver_arm_poses(base_T_gripper: Sequence[Matrix4], mode: HandEyeMode) -> list[Matrix4]:
+    """The arm poses as the eye-in-hand equation wants them for this mode."""
+    poses = [np.asarray(t, dtype=float).reshape(4, 4) for t in base_T_gripper]
+    return poses if mode == "eye_in_hand" else [inv_T(t) for t in poses]
+
+
+def board_poses(
+    camera_pose: Matrix4,
     base_T_gripper: Sequence[Matrix4],
     cam_T_board: Sequence[Matrix4],
+    mode: HandEyeMode = "eye_in_hand",
 ) -> list[Matrix4]:
-    """The board's base-frame pose as each sample sees it through X."""
-    return [a @ gripper_T_cam @ b for a, b in zip(base_T_gripper, cam_T_board, strict=True)]
+    """The constant pose each sample implies: board in base, or board on gripper."""
+    arm = _solver_arm_poses(base_T_gripper, mode)
+    return [a @ camera_pose @ b for a, b in zip(arm, cam_T_board, strict=True)]
 
 
 def _median_index(boards: Sequence[Matrix4]) -> int:
@@ -145,29 +164,36 @@ def _median_index(boards: Sequence[Matrix4]) -> int:
 
 
 def residuals(
-    gripper_T_cam: Matrix4,
+    camera_pose: Matrix4,
     base_T_gripper: Sequence[Matrix4],
     cam_T_board: Sequence[Matrix4],
+    mode: HandEyeMode = "eye_in_hand",
 ) -> Residual:
-    """Spread of T_base_board across the samples. Anything it reports is error.
+    """Spread of the constant pose across the samples. Anything it reports is error.
 
     Measured against the median sample, not the mean, so one badly seen board
     does not drag the reference it is judged against toward itself.
     """
-    boards = boards_in_base(gripper_T_cam, base_T_gripper, cam_T_board)
+    boards = board_poses(camera_pose, base_T_gripper, cam_T_board, mode)
     reference = boards[_median_index(boards)]
     return Residual(
         pos_mm=np.array([np.linalg.norm(b[:3, 3] - reference[:3, 3]) * 1000.0 for b in boards]),
         rot_deg=np.array([angle_between(b, reference) for b in boards]),
+        label="board-in-base" if mode == "eye_in_hand" else "board-on-gripper",
     )
 
 
 @dataclass(frozen=True)
 class HandEyeResult:
-    """The mount, where it puts the board, and how good it is."""
+    """The camera pose, where it puts the board, and how good it is.
 
-    camera_in_gripper: Matrix4
-    board_in_base: Matrix4
+    camera_pose is T_gripper_cam eye-in-hand and T_base_cam eye-to-hand;
+    board_pose is T_base_board eye-in-hand and T_gripper_board eye-to-hand.
+    """
+
+    camera_pose: Matrix4
+    board_pose: Matrix4
+    mode: HandEyeMode
     method: str
     residual: Residual
     axis_spread: float
@@ -177,9 +203,10 @@ class HandEyeResult:
         return self.residual.n
 
     def describe(self) -> str:
-        t = self.camera_in_gripper[:3, 3]
+        t = self.camera_pose[:3, 3]
+        where = "camera on gripper" if self.mode == "eye_in_hand" else "camera in base"
         return (
-            f"camera on gripper: [{t[0]:+.4f} {t[1]:+.4f} {t[2]:+.4f}] m "
+            f"{where}: [{t[0]:+.4f} {t[1]:+.4f} {t[2]:+.4f}] m "
             f"({self.method}, {self.n_poses} poses)\n  {self.residual.describe()}"
             f"\n  rotation diversity {self.axis_spread:.3f}"
         )
@@ -190,32 +217,36 @@ def solve(
     cam_T_board: Sequence[Matrix4],
     method: str = "PARK",
     min_axis_spread: float = MIN_AXIS_SPREAD,
+    mode: HandEyeMode = "eye_in_hand",
 ) -> HandEyeResult:
-    """Eye-in-hand solve for T_gripper_cam.
+    """Solve for T_gripper_cam (eye-in-hand) or T_base_cam (eye-to-hand).
 
     PARK separates rotation from translation and is the steadiest on small
     sets; ANDREFF and DANIILIDIS solve both at once and do better with large,
     varied rotations. `compare_methods()` runs them all.
     """
-    a = [np.asarray(t, dtype=float).reshape(4, 4) for t in base_T_gripper]
+    arm = [np.asarray(t, dtype=float).reshape(4, 4) for t in base_T_gripper]
     b = [np.asarray(t, dtype=float).reshape(4, 4) for t in cam_T_board]
-    if len(a) != len(b):
-        raise ValueError(f"{len(a)} arm poses against {len(b)} board poses")
-    if len(a) < MIN_POSES:
+    if len(arm) != len(b):
+        raise ValueError(f"{len(arm)} arm poses against {len(b)} board poses")
+    if len(arm) < MIN_POSES:
         raise ValueError(
-            f"{len(a)} poses is not enough; AX=XB needs at least {MIN_POSES}, "
+            f"{len(arm)} poses is not enough; AX=XB needs at least {MIN_POSES}, "
             "and 15-20 well spread is what makes it stable"
         )
 
-    spread = axis_spread(a)
+    # Measured on the arm's own poses in either mode: it is the wrist's motion
+    # that has to be diverse.
+    spread = axis_spread(arm)
     if spread < min_axis_spread:
         raise ValueError(
             f"rotation diversity {spread:.3f} is below {min_axis_spread}: the wrist "
-            "turned about too nearly one axis, which leaves the mount under-determined. "
+            "turned about too nearly one axis, which leaves the camera under-determined. "
             "Re-collect turning the wrist about genuinely different axes -- "
             "translation alone constrains nothing."
         )
 
+    a = _solver_arm_poses(arm, mode)
     rotation, translation = cv2.calibrateHandEye(
         [t[:3, :3] for t in a],
         [t[:3, 3] for t in a],
@@ -223,16 +254,17 @@ def solve(
         [t[:3, 3] for t in b],
         method=getattr(cv2, f"CALIB_HAND_EYE_{method.upper()}"),
     )
-    gripper_T_cam = make_T(rotation, translation)
-    if not np.all(np.isfinite(gripper_T_cam)):
+    camera_pose = make_T(rotation, translation)
+    if not np.all(np.isfinite(camera_pose)):
         raise ValueError(f"{method.upper()} returned a non-finite transform")
 
-    boards = boards_in_base(gripper_T_cam, a, b)
+    boards = board_poses(camera_pose, arm, b, mode)
     return HandEyeResult(
-        camera_in_gripper=gripper_T_cam,
-        board_in_base=boards[_median_index(boards)],
+        camera_pose=camera_pose,
+        board_pose=boards[_median_index(boards)],
+        mode=mode,
         method=method.upper(),
-        residual=residuals(gripper_T_cam, a, b),
+        residual=residuals(camera_pose, arm, b, mode),
         axis_spread=spread,
     )
 
@@ -241,8 +273,9 @@ def compare_methods(
     base_T_gripper: Sequence[Matrix4],
     cam_T_board: Sequence[Matrix4],
     min_axis_spread: float = MIN_AXIS_SPREAD,
+    mode: HandEyeMode = "eye_in_hand",
 ) -> list[HandEyeResult]:
-    """Every solver on the same data, smallest board spread first.
+    """Every solver on the same data, smallest spread first.
 
     Five independent algorithms agreeing to a millimetre is strong evidence the
     data determines X. Disagreement is the data's fault, not the solver's.
@@ -253,7 +286,7 @@ def compare_methods(
     first_error: ValueError | None = None
     for method in METHODS:
         try:
-            results.append(solve(base_T_gripper, cam_T_board, method, min_axis_spread))
+            results.append(solve(base_T_gripper, cam_T_board, method, min_axis_spread, mode))
         except (ValueError, cv2.error) as error:
             if first_error is None:
                 first_error = ValueError(str(error))
@@ -262,10 +295,29 @@ def compare_methods(
     return sorted(results, key=lambda result: result.residual.pos_rms)
 
 
+def consistent_methods(results: Sequence[HandEyeResult]) -> list[HandEyeResult]:
+    """The solvers whose spread is near the best one's, best first.
+
+    A solver whose own spread is far worse has failed on this data -- ANDREFF's
+    linear solve is the usual one -- and its answer says nothing about whether
+    the data pins X down.
+    """
+    if not results:
+        return []
+    limit = max(
+        OUTLIER_SPREAD_RATIO * results[0].residual.pos_rms,
+        results[0].residual.pos_rms + OUTLIER_SPREAD_MARGIN_MM,
+    )
+    return [r for r in results if r.residual.pos_rms <= limit]
+
+
 def method_disagreement_mm(results: Sequence[HandEyeResult]) -> float:
-    """Largest camera-position gap between the best solver and any other."""
-    best = results[0].camera_in_gripper[:3, 3]
+    """Largest camera-position gap between the best solver and any consistent one."""
+    consistent = consistent_methods(results)
+    if not consistent:
+        return 0.0
+    best = consistent[0].camera_pose[:3, 3]
     return max(
-        (float(np.linalg.norm(r.camera_in_gripper[:3, 3] - best)) * 1000.0 for r in results),
+        (float(np.linalg.norm(r.camera_pose[:3, 3] - best)) * 1000.0 for r in consistent),
         default=0.0,
     )

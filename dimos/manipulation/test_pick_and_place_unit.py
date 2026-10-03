@@ -21,7 +21,7 @@ import pytest
 
 from dimos.manipulation.grasp_verification import GripperSettle
 from dimos.manipulation.manipulation_skills import ManipulationSkills
-from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
+from dimos.manipulation.pick_and_place_module import PickAndPlaceModule, await_arm_settle
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -40,16 +40,30 @@ def module() -> Iterator[PickAndPlaceModule]:
     instance._manipulation.list_planning_groups.return_value = [
         SimpleNamespace(id="arm/tool", has_gripper=True, tip_frame="tool")
     ]
-    instance._manipulation.get_state.return_value = SimpleNamespace(
-        groups={
-            "arm/tool": SimpleNamespace(
-                gripper_position=0.5,
-                end_effector_pose=PoseStamped(
-                    frame_id="world", orientation=Quaternion.from_euler(Vector3(0, 0, 0.7))
-                ),
-            )
-        }
-    )
+
+    def state() -> SimpleNamespace:
+        """The tip is wherever the motion commands so far have sent it."""
+        tip = Vector3(0.0, 0.0, 0.0)
+        for name, args, _ in instance._manipulation.mock_calls:
+            if name == "plan_to_poses":
+                tip = args[0]["arm/tool"].position
+            elif name == "move_linear":
+                tip = tip + Vector3(*args[:3])
+        return SimpleNamespace(
+            groups={
+                "arm/tool": SimpleNamespace(
+                    gripper_position=0.5,
+                    joints=SimpleNamespace(position=[0.0]),
+                    end_effector_pose=PoseStamped(
+                        frame_id="world",
+                        position=tip,
+                        orientation=Quaternion.from_euler(Vector3(0, 0, 0.7)),
+                    ),
+                )
+            }
+        )
+
+    instance._manipulation.get_state.side_effect = state
     instance._manipulation.plan_to_poses.return_value = SimpleNamespace(succeeded=True, message="")
     instance._manipulation.execute.return_value = SimpleNamespace(succeeded=True, message="")
     instance._manipulation.move_linear.return_value = SimpleNamespace(
@@ -75,6 +89,13 @@ def settled_gripper(monkeypatch: pytest.MonkeyPatch) -> None:
         return GripperSettle(True, position, True, 0.1)
 
     monkeypatch.setattr("dimos.manipulation.pick_and_place_module.await_gripper_settle", settle)
+
+
+@pytest.fixture(autouse=True)
+def settled_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "dimos.manipulation.pick_and_place_module.await_arm_settle", lambda *_, **__: True
+    )
 
 
 def _candidate(x: float, score: float = 1.0) -> GraspCandidate:
@@ -250,6 +271,44 @@ def test_place_uses_local_axis_and_clears_held_state(module: PickAndPlaceModule)
     assert module._selected_grasp is None
 
 
+def test_place_without_a_height_returns_to_the_pick_height(module: PickAndPlaceModule) -> None:
+    manipulation: Any = module._manipulation
+    assert module.pick_object("cup-1").is_success()
+    manipulation.plan_to_poses.reset_mock()
+
+    result = module.place_at(0.4, 0.1)
+
+    assert result.is_success()
+    # The fixture's grasp sits at z=0.2; the pre-place pose is one offset above it.
+    preplace = manipulation.plan_to_poses.call_args_list[0].args[0]["arm/tool"]
+    assert (preplace.position.x, preplace.position.y) == pytest.approx((0.4, 0.1))
+    assert preplace.position.z == pytest.approx(0.2 + module.config.pregrasp_offset)
+
+
+def test_place_refuses_a_height_below_the_floor(module: PickAndPlaceModule) -> None:
+    manipulation: Any = module._manipulation
+    module.config.min_place_z = 0.05
+    module._selected_grasp = PoseStamped(frame_id="world", position=Vector3(0.1, 0.0, 0.2))
+    module._holding_object = True
+
+    result = module.place_at(0.4, 0.0, 0.049)
+
+    assert result.error_code == "INVALID_INPUT"
+    manipulation.plan_to_poses.assert_not_called()
+    assert module._holding_object
+
+
+def test_place_at_the_pick_height_is_not_held_to_the_floor(module: PickAndPlaceModule) -> None:
+    """The object left its support at that height, so it is reachable by construction."""
+    module.config.min_place_z = 0.5
+    module._selected_grasp = PoseStamped(frame_id="world", position=Vector3(0.1, 0.0, 0.2))
+    module._holding_object = True
+
+    result = module.place_at(0.4, 0.0)
+
+    assert result.is_success()
+
+
 def test_scan_failure_clears_stale_selection(module: PickAndPlaceModule) -> None:
     scene: Any = module._scene
     module._selected_grasp = PoseStamped(frame_id="world")
@@ -311,6 +370,92 @@ def test_final_grasp_leg_skips_collision_checking(module: PickAndPlaceModule) ->
     assert manipulation.move_linear.call_args_list
     for call in manipulation.move_linear.call_args_list:
         assert call.kwargs["check_collision"] is False
+
+
+def test_straight_leg_ends_at_its_target_from_where_the_arm_settled(
+    module: PickAndPlaceModule,
+) -> None:
+    """A move that stops short must not carry its shortfall into the grasp."""
+    manipulation: Any = module._manipulation
+    tracked = manipulation.get_state.side_effect
+
+    def short_of_the_pregrasp() -> SimpleNamespace:
+        state = tracked()
+        if not manipulation.move_linear.called:
+            tip = state.groups["arm/tool"].end_effector_pose
+            tip.position = tip.position + Vector3(-0.008, 0.005, 0.0)
+        return state
+
+    manipulation.get_state.side_effect = short_of_the_pregrasp
+
+    assert module.pick_object("cup-1").success
+
+    # The fixture's grasp is at (0.1, 0, 0.2), with the pregrasp 0.1 above it.
+    approach = manipulation.move_linear.call_args_list[0].args[:3]
+    assert approach == pytest.approx((0.008, -0.005, -0.1))
+
+
+def test_straight_leg_refuses_to_start_far_from_where_the_last_move_ended(
+    module: PickAndPlaceModule,
+) -> None:
+    """A move the arm never made must not become a long unchecked line."""
+    manipulation: Any = module._manipulation
+    tracked = manipulation.get_state.side_effect
+
+    def never_left() -> SimpleNamespace:
+        state = tracked()
+        state.groups["arm/tool"].end_effector_pose.position = Vector3(0.3, 0.2, 0.3)
+        return state
+
+    manipulation.get_state.side_effect = never_left
+
+    result = module.pick_object("cup-1")
+
+    assert result.error_code == "EXECUTION_FAILED"
+    manipulation.move_linear.assert_not_called()
+    assert not module._holding_object
+
+
+class _FakeClock:
+    """Monotonic clock advanced only by the sleeps the helper performs."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_arm_settle_waits_for_the_joints_to_stop() -> None:
+    clock = _FakeClock()
+    readings = iter([[0.0], [0.1], [0.2], [0.2], [0.2], [0.2]])
+
+    settled = await_arm_settle(
+        lambda: next(readings), tolerance=0.001, timeout=1.0, sleep=clock.sleep, clock=clock
+    )
+
+    assert settled
+    # Two moving readings, then three unchanged ones in a row.
+    assert clock.now == pytest.approx(0.25)
+
+
+def test_arm_settle_gives_up_at_the_deadline_while_still_moving() -> None:
+    clock = _FakeClock()
+    position = [0.0]
+
+    def creeping() -> list[float]:
+        position[0] += 0.01
+        return list(position)
+
+    settled = await_arm_settle(
+        creeping, tolerance=0.001, timeout=0.2, sleep=clock.sleep, clock=clock
+    )
+
+    assert not settled
+    assert clock.now == pytest.approx(0.2)
 
 
 def test_empty_grasp_reopens_before_failing(
