@@ -50,6 +50,9 @@ class PickAndPlaceModuleConfig(ModuleConfig):
     # always kinematically reachable; a single-candidate provider is unaffected.
     max_grasp_attempts: int = Field(default=5, gt=0)
     yaw_policy: Literal["generated", "preserve_current"] = "generated"
+    # move_near's default standoff. Further out than the pre-grasp so the open
+    # fingers stay clear of the object and whatever it rests on.
+    near_offset: float = Field(default=0.15, gt=0.0)
     grasp_verification: GraspVerificationConfig = Field(default_factory=GraspVerificationConfig)
 
 
@@ -120,31 +123,10 @@ class PickAndPlaceModule(Module):
                 "INVALID_STATE", "Place the held object before starting another pick"
             )
         self._clear_selection()
-        if object_id not in self._objects:
-            return SkillResult.fail("OBJECT_NOT_DETECTED", f"Unknown object_id: {object_id}")
-        try:
-            pointcloud = self._scene.get_object_pointcloud_by_object_id(object_id)
-            if pointcloud is None:
-                return SkillResult.fail(
-                    "OBJECT_NOT_DETECTED", f"No pointcloud for object_id: {object_id}"
-                )
-            candidates = self._grasp_generator.propose_grasps(pointcloud)
-        except (RuntimeError, ValueError) as exc:
-            return SkillResult.fail("GRASP_GENERATION_FAILED", str(exc))
-        self._grasp_candidates = candidates
-        self._manipulation.show_grasp_proposals(candidates)
-        if candidates.header.frame_id != self.config.planning_frame:
-            return SkillResult.fail(
-                "GRASP_FRAME_MISMATCH",
-                f"Expected {self.config.planning_frame}, got {candidates.header.frame_id}",
-            )
-        if not candidates.candidates:
-            return SkillResult.fail("GRASP_GENERATION_FAILED", "No grasp candidates generated")
-        group = self._resolve_group(planning_group)
-        if group is None:
-            return SkillResult.fail(
-                "ROBOT_NOT_FOUND", "Gripper-capable planning group is missing or ambiguous"
-            )
+        proposed = self._propose_grasps(object_id, planning_group)
+        if isinstance(proposed, SkillResult):
+            return proposed
+        candidates, group = proposed
         if failure := self._open_gripper(group, "pre-grasp open"):
             return failure
 
@@ -186,6 +168,94 @@ class PickAndPlaceModule(Module):
         return unreachable or SkillResult.fail(
             "PLANNING_FAILED", "No grasp candidate was reachable"
         )
+
+    @skill(uses=[CAP_MOVEMENT])
+    def move_near(
+        self,
+        object_id: str,
+        distance: float | None = None,
+        planning_group: PlanningGroupID | None = None,
+    ) -> SkillResult[ManipulationSkillError]:
+        """Move the gripper to a standoff pose over one object from the latest scan.
+
+        Plans to the best grasp backed off along its approach axis, further out
+        than pick_object's pre-grasp, with the yaw aligned to that grasp. The
+        gripper is left as it is and nothing is picked.
+
+        Args:
+            object_id: Exact object ID returned by the latest scan_objects call.
+            distance: Standoff from the grasp point in meters; default 0.15.
+            planning_group: Gripper-capable pose group; omitted only when unambiguous.
+        """
+        standoff = self.config.near_offset if distance is None else distance
+        if not standoff > 0.0:
+            return SkillResult.fail("INVALID_INPUT", "distance must be positive")
+        proposed = self._propose_grasps(object_id, planning_group)
+        if isinstance(proposed, SkillResult):
+            return proposed
+        candidates, group = proposed
+        unreachable: SkillResult[ManipulationSkillError] | None = None
+        for rank, candidate in enumerate(candidates.candidates[: self.config.max_grasp_attempts]):
+            grasp = self._apply_yaw_policy(
+                PoseStamped(
+                    ts=candidates.header.timestamp,
+                    frame_id=candidates.header.frame_id,
+                    position=candidate.pose.position,
+                    orientation=candidate.pose.orientation,
+                ),
+                group,
+            )
+            near = self._offset_pose(grasp, standoff)
+            failure = self._move(near, group)
+            if failure is not None:
+                if failure.error_code != "PLANNING_FAILED":
+                    return failure
+                unreachable = failure
+                continue
+            return SkillResult.ok(
+                f"Holding {standoff:.2f} m from {object_id} along the grasp approach",
+                object_id=object_id,
+                rank=rank,
+                score=candidate.score,
+                standoff=standoff,
+                x=near.position.x,
+                y=near.position.y,
+                z=near.position.z,
+            )
+        return unreachable or SkillResult.fail(
+            "PLANNING_FAILED", "No standoff pose over a grasp candidate was reachable"
+        )
+
+    def _propose_grasps(
+        self, object_id: str, planning_group: PlanningGroupID | None
+    ) -> tuple[GraspCandidateArray, PlanningGroupID] | SkillResult[ManipulationSkillError]:
+        """Rank grasps for one scanned object, or the failure that stopped it."""
+        if object_id not in self._objects:
+            return SkillResult.fail("OBJECT_NOT_DETECTED", f"Unknown object_id: {object_id}")
+        try:
+            pointcloud = self._scene.get_object_pointcloud_by_object_id(object_id)
+            if pointcloud is None:
+                return SkillResult.fail(
+                    "OBJECT_NOT_DETECTED", f"No pointcloud for object_id: {object_id}"
+                )
+            candidates = self._grasp_generator.propose_grasps(pointcloud)
+        except (RuntimeError, ValueError) as exc:
+            return SkillResult.fail("GRASP_GENERATION_FAILED", str(exc))
+        self._grasp_candidates = candidates
+        self._manipulation.show_grasp_proposals(candidates)
+        if candidates.header.frame_id != self.config.planning_frame:
+            return SkillResult.fail(
+                "GRASP_FRAME_MISMATCH",
+                f"Expected {self.config.planning_frame}, got {candidates.header.frame_id}",
+            )
+        if not candidates.candidates:
+            return SkillResult.fail("GRASP_GENERATION_FAILED", "No grasp candidates generated")
+        group = self._resolve_group(planning_group)
+        if group is None:
+            return SkillResult.fail(
+                "ROBOT_NOT_FOUND", "Gripper-capable planning group is missing or ambiguous"
+            )
+        return candidates, group
 
     @rpc
     def get_grasp_candidates(self) -> GraspCandidateArray:
