@@ -9,13 +9,19 @@ Scripts live in `scripts/` beside this file. Run them with the project interpret
 
 ## Steps
 
-1. **Check the rig is attached.** `lsusb` should list the CAN adapter and the RealSense, and `ip -br link show can0` should show the interface UP. A missing `can0` with a serial adapter (`/dev/ttyACM0`) needs `sudo slcand -o -c -s8 /dev/ttyACM0 can0 && sudo ip link set can0 up`; ask the operator if sudo needs a password. Completion: `scripts/piper_joints.py` prints six joints.
+1. **Run `scripts/preflight.py`.** It checks the CAN adapter, the arm, the cameras, the GPU, cached models and rig settings, and prints the fix for anything that fails. A missing `can0` needs the operator when sudo wants a password; your turn has to end before they can run it. Completion: no `FAIL` lines.
 2. **Check every joint is healthy before blaming software.** `scripts/piper_joints.py` must show all six `enabled ... ok` once a stack is running. A joint that stays `DISABLED` with fault flags while the others are enabled makes the arm ignore joint moves while every trajectory still reports `COMPLETED`. Stop the stack, run `scripts/piper_joints.py --clear N`, start the stack again. All six reading `DISABLED ... collision, driver error` before any stack has connected is just the state after power-up; the adapter's connect sequence clears it.
-3. **Start the stack in the background.** `dimos --can-port can0 run piper-grasp --daemon > run.log 2>&1 < /dev/null &`, then wait for `DimOS running in background` in the log. Redirect to a file: the daemon keeps a pipe open and the command never returns. A slcan `can0` reports no bitrate, so set `PIPER_JUDGE_CAN=0`; set `PIPER_JOINT_OFFSETS_DEG` to the arm's offsets. The first start downloads several GB of model weights with no progress output, so a long silent start is a download, not a hang.
+3. **Start the stack with `scripts/stack.py start`** (`restart`, `stop`, `status`). It launches the blueprint detached, waits until it is ready or dead, prints why when it is dead, and clears what a killed stack leaves behind. Settings that belong to one rig go in `rig.ignore.env` in this folder (git-ignored `KEY=VALUE` lines): `PIPER_JUDGE_CAN=0` for a slcan adapter, the arm's `PIPER_JOINT_OFFSETS_DEG`, and `PIPER_SCENE_CAMERA`. The first start of a blueprint downloads several GB of model weights with no progress output.
 4. **Drive it with `scripts/dimos_rpc.py`.** It is `dimos shell` without the terminal: a snippet on stdin gets `app`. The usual loop is `app.ManipulationSkills.go_home()`, `app.PickAndPlaceModule.scan_objects([...])`, `pick_object(object_id)`, `place_at(x, y)`.
 5. **Look before and after every move.** `scripts/grab_frame.py out.png` saves what the wrist camera sees; read the image. Results that say `OK` are not evidence that the object is where it should be: re-scan and compare the object's cloud with the target. Measure with the camera facing the object (`move_to_joints` with the scan pose's joint 1 set to the object's azimuth). From the home pose an object off to one side is partly cut off by the frame and reads up to 1 cm from where it is.
 6. **Park the arm when idle.** `app.ManipulationSkills.go_init()` returns it to the rest pose. Holding the scan pose loads the elbow and wrist motors and they warm up; `scripts/piper_joints.py` reports temperatures. `go_init` raises `Invalid goal configuration` when the arm started with a joint reading just past its limit (joint 2 rests on its lower stop); `dimos stop` parks the arm in that case.
-7. **Stop with `dimos stop`.** The adapter homes and disables the arm on the way out.
+7. **Stop with `scripts/stack.py stop`.** The adapter homes and disables the arm on the way out.
+
+## Seeing the whole scene
+
+`scripts/timelapse.py start` records the scene camera, one frame a second, and keeps `latest.jpg` current; `status` prints its path, `render` makes the video so far. Read `latest.jpg` for a third-person view of the arm and the object: the wrist camera cannot see the gripper touch anything, or an object taller than about 15 cm from the scan pose. The recorder owns the camera's colour stream, so do not open it elsewhere.
+
+A tall object is also an obstacle the planner does not know. Before moving near it, register it with `app.ManipulationModule.add_obstacle(name, pose, "cylinder", [radius, height])` and retract upward before turning joint 1 past it.
 
 ## What goes wrong
 

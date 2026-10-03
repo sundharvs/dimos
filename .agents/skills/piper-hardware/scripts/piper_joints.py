@@ -27,6 +27,7 @@ restart it afterwards so the adapter re-enables the joint.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import time
 
 import can
@@ -46,6 +47,8 @@ FAULT_BITS = {
     5: "driver error",
     7: "stall",
 }
+# What every driver reports between power-up and its first enable.
+POWER_UP_FAULTS = ("collision", "driver error")
 CTRL_MODES = {0x00: "standby", 0x01: "CAN control", 0x02: "teaching"}
 # piper_sdk's "this field is not being set" value for the joint acceleration.
 ACCELERATION_UNCHANGED = 0x7FFF
@@ -53,46 +56,81 @@ CLEAR_ERROR = 0xAE
 ALL_JOINTS = 7
 
 
-def read_frames(channel: str) -> dict[int, bytes]:
-    """The latest arm-status and per-joint driver frames seen on the bus."""
+class CanBusError(RuntimeError):
+    """The CAN interface cannot be opened, or carries no Piper feedback."""
+
+
+@dataclass(frozen=True)
+class JointStatus:
+    joint: int
+    enabled: bool
+    faults: tuple[str, ...]
+    motor_c: int
+    driver_c: int
+
+
+@dataclass(frozen=True)
+class ArmStatus:
+    mode: str
+    joints: tuple[JointStatus, ...]
+
+    @property
+    def awaiting_first_enable(self) -> bool:
+        """Every driver disabled with the flags they all carry after power-up."""
+        return all(not joint.enabled and joint.faults == POWER_UP_FAULTS for joint in self.joints)
+
+    @property
+    def faulted_joints(self) -> tuple[JointStatus, ...]:
+        if self.awaiting_first_enable:
+            return ()
+        return tuple(joint for joint in self.joints if joint.faults)
+
+
+def read_status(channel: str) -> ArmStatus:
+    """Listen for one arm-status frame and one driver frame per joint."""
     wanted = {ARM_STATUS_ID, *JOINT_STATUS_IDS}
     frames: dict[int, bytes] = {}
     deadline = time.monotonic() + LISTEN_TIMEOUT_S
     try:
         bus = can.Bus(channel=channel, interface="socketcan")
     except OSError as error:
-        raise SystemExit(f"cannot open {channel}: {error}. Is the CAN interface up?") from None
+        raise CanBusError(f"cannot open {channel}: {error}") from None
     with bus:
         while frames.keys() != wanted and time.monotonic() < deadline:
             message = bus.recv(timeout=0.1)
             if message is not None and message.arbitration_id in wanted:
                 frames[message.arbitration_id] = bytes(message.data)
-    return frames
+    if frames.keys() != wanted:
+        raise CanBusError(f"no Piper feedback on {channel}: is the arm powered?")
 
-
-def print_status(channel: str) -> None:
-    frames = read_frames(channel)
-    if not frames:
-        raise SystemExit(f"no Piper feedback on {channel}: is the arm powered and the bus up?")
-    arm = frames.get(ARM_STATUS_ID)
-    if arm is not None:
-        mode = CTRL_MODES.get(arm[0], f"0x{arm[0]:02x}")
-        print(f"arm: mode={mode} status=0x{arm[1]:02x} error=0x{arm[6]:02x}{arm[7]:02x}")
+    joints = []
     for frame_id in JOINT_STATUS_IDS:
-        data = frames.get(frame_id)
-        joint = frame_id - JOINT_STATUS_IDS.start + 1
-        if data is None:
-            print(f"joint {joint}: no feedback")
-            continue
+        data = frames[frame_id]
         status = data[5]
-        faults = [name for bit, name in FAULT_BITS.items() if status >> bit & 1]
-        enabled = "enabled " if status >> ENABLED_BIT & 1 else "DISABLED"
-        motor_c = int.from_bytes(data[4:5], "big", signed=True)
-        driver_c = int.from_bytes(data[2:4], "big", signed=True)
-        print(
-            f"joint {joint}: {enabled} motor {motor_c:3d} C  driver {driver_c:3d} C  "
-            f"{', '.join(faults) or 'ok'}"
+        joints.append(
+            JointStatus(
+                joint=frame_id - JOINT_STATUS_IDS.start + 1,
+                enabled=bool(status >> ENABLED_BIT & 1),
+                faults=tuple(name for bit, name in FAULT_BITS.items() if status >> bit & 1),
+                motor_c=int.from_bytes(data[4:5], "big", signed=True),
+                driver_c=int.from_bytes(data[2:4], "big", signed=True),
+            )
         )
+    mode_byte = frames[ARM_STATUS_ID][0]
+    return ArmStatus(CTRL_MODES.get(mode_byte, f"0x{mode_byte:02x}"), tuple(joints))
+
+
+def format_status(status: ArmStatus) -> str:
+    lines = [f"arm: mode={status.mode}"]
+    for joint in status.joints:
+        enabled = "enabled " if joint.enabled else "DISABLED"
+        lines.append(
+            f"joint {joint.joint}: {enabled} motor {joint.motor_c:3d} C  "
+            f"driver {joint.driver_c:3d} C  {', '.join(joint.faults) or 'ok'}"
+        )
+    if status.awaiting_first_enable:
+        lines.append("(all drivers idle since power-up; a stack's connect enables them)")
+    return "\n".join(lines)
 
 
 def clear_fault(channel: str, joint: int) -> None:
@@ -122,9 +160,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.clear is not None:
-        clear_fault(args.can_port, ALL_JOINTS if args.clear == "all" else int(args.clear))
-    print_status(args.can_port)
+    try:
+        if args.clear is not None:
+            clear_fault(args.can_port, ALL_JOINTS if args.clear == "all" else int(args.clear))
+        print(format_status(read_status(args.can_port)))
+    except CanBusError as error:
+        raise SystemExit(str(error)) from None
 
 
 if __name__ == "__main__":

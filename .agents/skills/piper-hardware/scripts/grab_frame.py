@@ -35,31 +35,42 @@ from dimos.msgs.sensor_msgs.Image import Image
 FRAME_TIMEOUT_S = 8.0
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("output", type=Path, help="image file to write, e.g. frame.png")
-    parser.add_argument("--topic", default="/color_image")
-    args = parser.parse_args()
+class NoFrameError(RuntimeError):
+    """Nothing was published on the topic in time."""
 
+
+def save_frame(output: Path, topic: str = "/color_image") -> Image:
+    """Write the next image published on ``topic`` to ``output``."""
     frames: queue.Queue[Image] = queue.Queue(maxsize=1)
 
     def keep_first(image: Image) -> None:
         if frames.empty():
             frames.put_nowait(image)
 
-    transport = make_transport(args.topic, Image)
+    transport = make_transport(topic, Image)
     unsubscribe = transport.subscribe(keep_first)
     try:
         image = frames.get(timeout=FRAME_TIMEOUT_S)
     except queue.Empty:
-        raise SystemExit(f"no frame on {args.topic} within {FRAME_TIMEOUT_S:.0f}s") from None
+        raise NoFrameError(f"no frame on {topic} within {FRAME_TIMEOUT_S:.0f}s") from None
     finally:
         unsubscribe()
         transport.stop()
+    cv2.imwrite(str(output), image.to_opencv())
+    return image
 
-    pixels = image.to_opencv()
-    cv2.imwrite(str(args.output), pixels)
-    print(f"{args.output}: {pixels.shape[1]}x{pixels.shape[0]} from {image.frame_id}")
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("output", type=Path, help="image file to write, e.g. frame.png")
+    parser.add_argument("--topic", default="/color_image")
+    args = parser.parse_args()
+
+    try:
+        image = save_frame(args.output, args.topic)
+    except NoFrameError as error:
+        raise SystemExit(str(error)) from None
+    print(f"{args.output}: {image.width}x{image.height} from {image.frame_id}")
 
 
 if __name__ == "__main__":
