@@ -75,8 +75,6 @@ class PickAndPlaceModule(Module):
         self._selected_object_id: str | None = None
         self._selected_grasp: PoseStamped | None = None
         self._holding_object = False
-        # (object_id, standoff) parked by find_and_move_near until confirmed.
-        self._pending_near: tuple[str, float] | None = None
 
     @skill
     def scan_objects(self, prompts: list[str]) -> SkillResult[ManipulationSkillError]:
@@ -234,23 +232,21 @@ class PickAndPlaceModule(Module):
             "PLANNING_FAILED", "No standoff pose over a grasp candidate was reachable"
         )
 
-    @skill
+    @skill(uses=[CAP_MOVEMENT])
     def find_and_move_near(
         self, prompts: list[str], distance: float = 0.01
     ) -> SkillResult[ManipulationSkillError]:
-        """Scan for prompted objects and, if one is found, ask before moving near it.
+        """Scan for prompted objects and move near the first one found.
 
-        Nothing moves here. On a detection the first object is parked and the
-        result asks for a yes/no; confirm_move_near(True) then runs move_near
-        on it at the given standoff, confirm_move_near(False) drops it.
+        Runs scan_objects, then move_near on the first detection at the given
+        standoff. The gripper is left as it is and nothing is picked.
 
         Args:
             prompts: Object labels to detect, as for scan_objects.
-            distance: Standoff from the grasp point in meters once confirmed.
+            distance: Standoff from the grasp point in meters.
         """
         if not distance > 0.0:
             return SkillResult.fail("INVALID_INPUT", "distance must be positive")
-        self._pending_near = None
         scan = self.scan_objects(prompts)
         if not scan.is_success():
             return scan
@@ -258,35 +254,11 @@ class PickAndPlaceModule(Module):
         if not objects:
             return SkillResult.fail("OBJECT_NOT_DETECTED", f"No object matched {prompts}")
         chosen = objects[0]
-        object_id = str(chosen["object_id"])
-        self._pending_near = (object_id, distance)
-        others = "" if len(objects) == 1 else f" ({len(objects) - 1} more detected)"
-        return SkillResult.ok(
-            f"Found {chosen['name']!r} (id {object_id}){others}. Move near it at "
-            f"{distance:.2f} m? Answer with confirm_move_near(True) or confirm_move_near(False).",
-            pending_object_id=object_id,
-            pending_name=chosen["name"],
-            distance=distance,
-            objects=objects,
-        )
-
-    @skill(uses=[CAP_MOVEMENT])
-    def confirm_move_near(self, yes: bool) -> SkillResult[ManipulationSkillError]:
-        """Answer find_and_move_near's question: True moves near the found object, False cancels.
-
-        Args:
-            yes: True to run move_near on the parked object, False to drop it.
-        """
-        pending = self._pending_near
-        self._pending_near = None
-        if pending is None:
-            return SkillResult.fail(
-                "INVALID_STATE", "Nothing to confirm; call find_and_move_near first"
-            )
-        object_id, distance = pending
-        if not yes:
-            return SkillResult.ok(f"Cancelled; not moving near {object_id}", object_id=object_id)
-        return self.move_near(object_id, distance=distance)
+        result = self.move_near(str(chosen["object_id"]), distance=distance)
+        if result.is_success():
+            result.metadata["name"] = chosen["name"]
+            result.metadata["detected"] = len(objects)
+        return result
 
     def _propose_grasps(
         self, object_id: str, planning_group: PlanningGroupID | None

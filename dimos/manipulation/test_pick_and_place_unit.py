@@ -417,7 +417,7 @@ def test_motion_skills_declare_movement_capability() -> None:
     skills = [
         PickAndPlaceModule.pick_object,
         PickAndPlaceModule.move_near,
-        PickAndPlaceModule.confirm_move_near,
+        PickAndPlaceModule.find_and_move_near,
         PickAndPlaceModule.place_at,
         ManipulationSkills.move_to_pose,
         ManipulationSkills.move_to_joints,
@@ -534,66 +534,47 @@ def _detections(*pairs: tuple[str, str]) -> Any:
     )
 
 
-def test_find_and_move_near_asks_before_moving(module: PickAndPlaceModule) -> None:
-    manipulation: Any = module._manipulation
-    module._scene.scan_scene.return_value = _detections(("eraser-1", "whiteboard eraser"))
-
-    result = module.find_and_move_near(["whiteboard eraser"])
-
-    assert result.is_success()
-    assert result.metadata["pending_object_id"] == "eraser-1"
-    assert result.metadata["distance"] == pytest.approx(0.01)
-    assert "confirm_move_near(True)" in result.message
-    manipulation.plan_to_poses.assert_not_called()
-
-
-def test_confirm_move_near_runs_move_near_at_the_parked_standoff(
+def test_find_and_move_near_scans_then_moves_near_the_first_match(
     module: PickAndPlaceModule,
 ) -> None:
     manipulation: Any = module._manipulation
-    module._scene.scan_scene.return_value = _detections(("cup-1", "cup"))
-    module.find_and_move_near(["cup"], distance=0.02)
+    module._scene.scan_scene.return_value = _detections(
+        ("eraser-1", "whiteboard eraser"), ("eraser-2", "whiteboard eraser")
+    )
 
-    result = module.confirm_move_near(True)
+    result = module.find_and_move_near(["whiteboard eraser"], distance=0.02)
 
     assert result.is_success()
-    assert result.metadata["object_id"] == "cup-1"
+    assert result.metadata["object_id"] == "eraser-1"
+    assert result.metadata["name"] == "whiteboard eraser"
+    assert result.metadata["detected"] == 2
     assert result.metadata["standoff"] == pytest.approx(0.02)
     (targets,), _ = manipulation.plan_to_poses.call_args
     assert targets["arm/tool"].position.z == pytest.approx(0.22)
-    # The parked request is consumed; a second answer has nothing to act on.
-    assert module.confirm_move_near(True).error_code == "INVALID_STATE"
+    manipulation.set_gripper_position.assert_not_called()
 
 
-def test_confirm_move_near_false_cancels_without_moving(module: PickAndPlaceModule) -> None:
+def test_find_and_move_near_defaults_to_one_centimetre(module: PickAndPlaceModule) -> None:
     manipulation: Any = module._manipulation
     module._scene.scan_scene.return_value = _detections(("cup-1", "cup"))
-    module.find_and_move_near(["cup"])
 
-    result = module.confirm_move_near(False)
+    result = module.find_and_move_near(["cup"])
 
     assert result.is_success()
-    manipulation.plan_to_poses.assert_not_called()
-    assert module.confirm_move_near(True).error_code == "INVALID_STATE"
+    assert result.metadata["standoff"] == pytest.approx(0.01)
+    (targets,), _ = manipulation.plan_to_poses.call_args
+    assert targets["arm/tool"].position.z == pytest.approx(0.21)
 
 
 def test_find_and_move_near_reports_an_empty_scan(module: PickAndPlaceModule) -> None:
+    manipulation: Any = module._manipulation
     module._scene.scan_scene.return_value = _detections()
 
     result = module.find_and_move_near(["unicorn"])
 
     assert not result.is_success()
     assert result.error_code == "OBJECT_NOT_DETECTED"
-    assert module.confirm_move_near(True).error_code == "INVALID_STATE"
-
-
-def test_find_and_move_near_parks_the_first_of_several(module: PickAndPlaceModule) -> None:
-    module._scene.scan_scene.return_value = _detections(("a", "cup"), ("b", "cup"))
-
-    result = module.find_and_move_near(["cup"])
-
-    assert result.metadata["pending_object_id"] == "a"
-    assert "1 more detected" in result.message
+    manipulation.plan_to_poses.assert_not_called()
 
 
 def test_move_near_reports_unknown_objects(module: PickAndPlaceModule) -> None:
