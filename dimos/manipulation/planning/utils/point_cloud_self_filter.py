@@ -59,6 +59,15 @@ class PointCloudSelfFilterConfig(ModuleConfig):
     world_frame: str = "world"
     tf_tolerance_s: float = Field(default=0.02, ge=0.0)
     tf_forward_tolerance_s: float = Field(default=0.05, ge=0.0)
+    # The surface the arm is bolted to lies within the base link's collision
+    # margin, so table cells mapped around the base plate put the base, and
+    # with it every start configuration, permanently in collision. Points
+    # within this horizontal radius of base_link between base_exclusion_z_min
+    # and base_exclusion_z_max are dropped and the cells there cleared. 0 disables.
+    base_exclusion_radius: float = Field(default=0.0, ge=0.0)
+    base_exclusion_z_max: float = 0.06
+    base_exclusion_z_min: float = -0.08
+    base_link: str = "link_base"
 
 
 class PointCloudSelfFilter(Module):
@@ -84,11 +93,26 @@ class PointCloudSelfFilter(Module):
         if not self._collision_geometry:
             raise ValueError("Robot model contains no collision geometry")
         self._previous_clear_keys: set[tuple[int, int, int]] = set()
+        self._paused = False
 
     @rpc
     def start(self) -> None:
         super().start()
         self._tf = TF(self.tf)
+
+    @rpc
+    def set_paused(self, paused: bool) -> bool:
+        """Freeze the map: while paused no cloud and no clear mask is published.
+
+        For the time an object is held, when the wrist camera would otherwise
+        map the carried object as an obstacle along the whole carry path.
+        """
+        self._paused = bool(paused)
+        return self._paused
+
+    @rpc
+    def is_paused(self) -> bool:
+        return self._paused
 
     @rpc
     def stop(self) -> None:
@@ -130,6 +154,34 @@ class PointCloudSelfFilter(Module):
             keys = np.floor(world_samples / config.voxel_size).astype(np.int32)
             current_clear_keys.update(map(tuple, keys.tolist()))
 
+        if config.base_exclusion_radius > 0.0 and len(points):
+            world_from_sensor = self._lookup(config.world_frame, cloud.frame_id, cloud.ts)
+            world_from_base = self._lookup(config.world_frame, config.base_link, cloud.ts)
+            if world_from_sensor is not None and world_from_base is not None:
+                world_points = _transform_points(points, world_from_sensor.to_matrix())
+                base_xy = world_from_base.to_matrix()[:2, 3]
+                radial = np.linalg.norm(world_points[:, :2] - base_xy, axis=1)
+                in_footprint = (
+                    (radial < config.base_exclusion_radius)
+                    & (world_points[:, 2] < config.base_exclusion_z_max)
+                    & (world_points[:, 2] > config.base_exclusion_z_min)
+                )
+                keep &= ~in_footprint
+                # Clear the whole footprint cylinder so cells mapped there
+                # before this filter ran are erased too.
+                r = config.base_exclusion_radius
+                step = config.voxel_size
+                xs = np.arange(base_xy[0] - r, base_xy[0] + r + step, step)
+                ys = np.arange(base_xy[1] - r, base_xy[1] + r + step, step)
+                zs = np.arange(
+                    config.base_exclusion_z_min, config.base_exclusion_z_max + step, step
+                )
+                gx, gy, gz = np.meshgrid(xs, ys, zs, indexing="ij")
+                grid = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
+                grid = grid[np.linalg.norm(grid[:, :2] - base_xy, axis=1) < r]
+                keys = np.floor(grid / step).astype(np.int32)
+                current_clear_keys.update(map(tuple, keys.tolist()))
+
         # Where the arm was plus where it is: a link that moved between frames
         # leaves a ghost behind it that nothing else will ever clear.
         clear_keys = self._previous_clear_keys | current_clear_keys
@@ -166,6 +218,8 @@ class PointCloudSelfFilter(Module):
         )
 
     def _on_pointcloud(self, cloud: PointCloud2) -> None:
+        if self._paused:
+            return
         result = self.filter_cloud(cloud)
         if result is None:
             return
