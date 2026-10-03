@@ -195,6 +195,7 @@ all_blueprints = {
     "xarm-grasp-graspgenx-agent": "dimos.robot.manipulators.xarm.blueprints.agentic:xarm_grasp_graspgenx_agent",
     "xarm-grasp-graspgenx-keyboard": "dimos.robot.manipulators.xarm.blueprints.grasp:xarm_grasp_graspgenx_keyboard",
     "xarm-grasp-keyboard": "dimos.robot.manipulators.xarm.blueprints.grasp:xarm_grasp_keyboard",
+    "xarm-grasp-keyboard-collect": "dimos.robot.manipulators.xarm.blueprints.grasp:xarm_grasp_keyboard_collect",
     "xarm-localize-live": "dimos.perception.localize.demo_blueprints.xarm_localize_live:xarm_localize_live",
     "xarm-perception-sim": "dimos.robot.manipulators.xarm.blueprints.simulation:xarm_perception_sim",
     "xarm-perception-sim-agent": "dimos.robot.manipulators.xarm.blueprints.agentic:xarm_perception_sim_agent",
@@ -377,5 +378,6 @@ all_modules = {
     "world-belief-module": "dimos.experimental.world_belief.worldbelief_module.WorldBeliefModule",
     "world-belief-recorder": "dimos.experimental.world_belief.worldbelief_recorder.WorldBeliefRecorder",
     "wrist-camera": "dimos.teleop.hosted.blueprints.cloudflare.WristCamera",
+    "x-arm-grasp-collection-recorder": "dimos.robot.manipulators.xarm.blueprints.grasp.XArmGraspCollectionRecorder",
     "zed-camera": "dimos.hardware.sensors.camera.zed.camera.ZEDCamera",
 }

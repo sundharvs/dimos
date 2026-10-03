@@ -128,6 +128,24 @@ def test_keyup_publishes_directly_without_timeout_wait(
     publish.assert_called_once()
 
 
+def test_every_keydown_publishes_a_key_press(module: KeyboardTeleopModule, mocker) -> None:
+    """EpisodeMonitorModule binds start/save/discard to these by pygame key name."""
+    publish = mocker.patch.object(module.keyboard, "publish")
+    held: set[int] = set()
+    down = keyboard_mod.pygame.event.Event(
+        keyboard_mod.pygame.KEYDOWN, key=keyboard_mod.pygame.K_SPACE
+    )
+    up = keyboard_mod.pygame.event.Event(keyboard_mod.pygame.KEYUP, key=keyboard_mod.pygame.K_SPACE)
+
+    module._handle_pygame_event(down, held)
+    module._handle_pygame_event(up, held)
+
+    publish.assert_called_once()
+    press = publish.call_args.args[0]
+    assert press.key == "space"
+    assert press.ts > 0
+
+
 def test_gripper_keys_publish_normalized_opening_only_when_it_changes(
     module: KeyboardTeleopModule, mocker
 ) -> None:
