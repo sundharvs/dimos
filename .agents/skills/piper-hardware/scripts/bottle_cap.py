@@ -100,7 +100,7 @@ VIEW_SETTLE_S = 1.5
 # its points are this near the cap's top: an open spout sits about 15 mm lower.
 ON_BOTTLE_RADIUS_M = 0.03
 ON_BOTTLE_DEPTH_M = 0.008
-# A grip this much narrower than the first is on something other than the cap.
+# A grip this much narrower or wider than the first is not on the cap.
 NARROWER_GRIP = 0.03
 RUNS = Path(timelapse.ROOT).parent / "bottle_cap"
 
@@ -180,14 +180,13 @@ class Bottle:
         self._run.mkdir(parents=True)
         self._frames: list[NDArray[np.uint8]] = []
         self.cap_width: float | None = None
-        self.clear = self.arm.solve(args.x, args.y, args.top + CLEAR_ABOVE_TOP, CLEAR_TILT_DEG)
-        self.seated = self.arm.solve(args.x, args.y, args.top + GRIP_ABOVE_TOP, GRIP_TILT_DEG)
-        self.resting = self.arm.solve(
-            args.x, args.y, args.top + GRIP_ABOVE_TOP + THREAD_TRAVEL_M, GRIP_TILT_DEG
+        grip = args.top + args.grip_above_top
+        self.clear = self.arm.solve(
+            args.x, args.y, grip + CLEAR_ABOVE_TOP - GRIP_ABOVE_TOP, CLEAR_TILT_DEG
         )
-        self.lifted = self.arm.solve(
-            args.x, args.y, args.top + GRIP_ABOVE_TOP + LIFT_CHECK_M, CLEAR_TILT_DEG
-        )
+        self.seated = self.arm.solve(args.x, args.y, grip, GRIP_TILT_DEG)
+        self.resting = self.arm.solve(args.x, args.y, grip + THREAD_TRAVEL_M, GRIP_TILT_DEG)
+        self.lifted = self.arm.solve(args.x, args.y, grip + LIFT_CHECK_M, CLEAR_TILT_DEG)
 
     def log(self, message: str) -> None:
         """Say it, write it down, and keep the scene camera's view of it."""
@@ -220,7 +219,7 @@ class Bottle:
             return False
         if self.cap_width is None:
             self.cap_width = held
-        return held > self.cap_width - NARROWER_GRIP
+        return abs(held - self.cap_width) < NARROWER_GRIP
 
     def look_for_cap_on_top(self) -> bool:
         """Lift, retract with the jaws as they are, and look for a cap where it belongs."""
@@ -294,7 +293,11 @@ def screw(bottle: Bottle) -> int:
     arm.grip(1.0)
     arm.move(bottle.clear, 0.0, speed=0.3)
     arm.move(bottle.seated, 0.0, speed=0.2)
-    bottle.log(f"tug: grip {arm.grip(0.0):.3f}")
+    held = arm.grip(0.0)
+    bottle.log(f"tug: grip {held:.3f}")
+    if not bottle.grip_is_on_cap(held):
+        # Whatever this is, it is not the cap: let go rather than lift it.
+        arm.grip(1.0)
     threaded = bottle.look_for_cap_on_top()
     bottle.log("cap is screwed on" if threaded else "cap did not stay on the bottle")
     return 0 if threaded else 1
@@ -313,6 +316,13 @@ def main() -> None:
     parser.add_argument("top", type=float, help="height of the cap's top when on, metres")
     parser.add_argument("--watch", type=parse_box, required=True, help="x0,y0,x1,y1 pixels")
     parser.add_argument("--prompt", default="bottle cap", help="what the detector calls the cap")
+    parser.add_argument(
+        "--grip-above-top",
+        type=float,
+        default=GRIP_ABOVE_TOP,
+        help="tool height above the cap top in this grip; about -0.007 for a cap picked "
+        "off the table, which sits higher in the jaws",
+    )
     args = parser.parse_args()
 
     app = Dimos.connect(timeout=CONNECT_TIMEOUT_S)
