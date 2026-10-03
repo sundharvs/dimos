@@ -416,6 +416,7 @@ def test_place_retains_held_state_when_release_fails(
 def test_motion_skills_declare_movement_capability() -> None:
     skills = [
         PickAndPlaceModule.pick_object,
+        PickAndPlaceModule.move_near,
         PickAndPlaceModule.place_at,
         ManipulationSkills.move_to_pose,
         ManipulationSkills.move_to_joints,
@@ -427,3 +428,73 @@ def test_motion_skills_declare_movement_capability() -> None:
     ]
 
     assert all(skill.__skill_uses__ == ["movement"] for skill in skills)
+
+
+def test_move_near_backs_off_along_the_grasp_approach(module: PickAndPlaceModule) -> None:
+    """The standoff sits further out than the pre-grasp and leaves the gripper alone."""
+    manipulation: Any = module._manipulation
+
+    result = module.move_near("cup-1")
+
+    assert result.is_success()
+    assert result.metadata["standoff"] == pytest.approx(0.15)
+    assert result.metadata["rank"] == 0
+    (targets,), _ = manipulation.plan_to_poses.call_args
+    pose = targets["arm/tool"]
+    # The candidate points straight down from z=0.2, so backing off along its
+    # approach axis raises the pose by the standoff and keeps the orientation.
+    assert pose.position.x == pytest.approx(0.1)
+    assert pose.position.z == pytest.approx(0.35)
+    assert pose.orientation.to_euler().x == pytest.approx(-3.141592653589793, abs=1e-6)
+    manipulation.execute.assert_called_once()
+    manipulation.move_linear.assert_not_called()
+    manipulation.set_gripper_position.assert_not_called()
+    assert module._holding_object is False
+    assert module._selected_grasp is None
+
+
+def test_move_near_honours_an_explicit_distance(module: PickAndPlaceModule) -> None:
+    manipulation: Any = module._manipulation
+
+    result = module.move_near("cup-1", distance=0.25)
+
+    assert result.is_success()
+    (targets,), _ = manipulation.plan_to_poses.call_args
+    assert targets["arm/tool"].position.z == pytest.approx(0.45)
+
+
+def test_move_near_rejects_a_non_positive_distance(module: PickAndPlaceModule) -> None:
+    manipulation: Any = module._manipulation
+
+    result = module.move_near("cup-1", distance=0.0)
+
+    assert not result.is_success()
+    assert result.error_code == "INVALID_INPUT"
+    manipulation.plan_to_poses.assert_not_called()
+
+
+def test_move_near_falls_through_to_the_next_reachable_candidate(
+    module: PickAndPlaceModule,
+) -> None:
+    manipulation: Any = module._manipulation
+    grasp_generator: Any = module._grasp_generator
+    grasp_generator.propose_grasps.return_value = GraspCandidateArray(
+        Header(1.0, "world"), [_candidate(0.1, score=0.9), _candidate(0.3, score=0.4)]
+    )
+    manipulation.plan_to_poses.side_effect = [
+        SimpleNamespace(succeeded=False, message="unreachable"),
+        SimpleNamespace(succeeded=True, message=""),
+    ]
+
+    result = module.move_near("cup-1")
+
+    assert result.is_success()
+    assert result.metadata["rank"] == 1
+    assert result.metadata["x"] == pytest.approx(0.3)
+
+
+def test_move_near_reports_unknown_objects(module: PickAndPlaceModule) -> None:
+    result = module.move_near("nope")
+
+    assert not result.is_success()
+    assert result.error_code == "OBJECT_NOT_DETECTED"
