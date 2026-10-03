@@ -48,6 +48,7 @@ from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.manipulation.manipulation_skills import ManipulationSkills
 from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
 from dimos.manipulation.planning.utils.point_cloud_self_filter import PointCloudSelfFilter
+from dimos.manipulation.wrist_tabletop_module import WristTabletopModule
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -357,12 +358,28 @@ xarm_grasp_keyboard = autoconnect(
 ).remappings(_REMAPPINGS)
 
 # ``xarm-grasp-bin``: rim grasps for open containers (bins, boxes) that a centroid
-# grasp cannot hold, and the guarded ContainerPickModule skills on top of them
-# (pick_up_container / set_down_container / rotate_held_container). Both modules'
-# parameters are RPC-settable so an outer research loop can tune them live.
+# grasp cannot hold, the guarded ContainerPickModule skills on top of them
+# (pick_up_container / place_container / place_container_in_slot / map_slots /
+# check_container_pose / rotate_held_container / set_down_container) and the
+# wrist-camera colour scan + tape-slot mapper they use. All parameters are
+# RPC-settable so an outer research loop can tune them live.
 xarm_grasp_bin = autoconnect(
     *_XARM_GRASP_MODULES,
     RimGraspModule.blueprint(min_z=None if SIMULATED else XARM_CONTAINER_MIN_Z),
+    WristTabletopModule.blueprint(
+        planning_frame="world",
+        # The yellow shelf bin (H 23-25, S > 190 in the wrist camera) and beige
+        # masking tape on beech (bluish-grey next to the orange wood).
+        object_hsv_low=(15, 120, 100),
+        object_hsv_high=(40, 255, 255),
+        tape_hsv_low=(80, 20, 120),
+        tape_hsv_high=(125, 110, 255),
+        slot_names=[
+            "left",
+            "middle",
+            "right",
+        ],  # from -X to +X: left as seen from the table's front
+    ),
     ContainerPickModule.blueprint(
         model=_model.model,
         planning_frame="world",
@@ -372,11 +389,21 @@ xarm_grasp_bin = autoconnect(
         workspace_box=XARM_CONTAINER_HAND_BOX,
         elbow_box=XARM_CONTAINER_ELBOW_BOX,
         wrist_joint="joint7",
+        wrist_joint_sign=-1.0,
         prompts=["yellow bin", "bin"],
         # The shelf bin the skill was learned on: 28 x 10 cm rim, so a fit much
         # shorter than that is a partial segmentation, not a smaller bin.
         container_long_min=0.24,
         container_short_range=(0.07, 0.14),
+        # Wrist RealSense optical centre relative to the TCP at the survey yaw
+        # (measured from TF), so surveys put the camera, not the TCP, above the target.
+        survey_camera_offset=(0.032, -0.070),
+        # Learned 2026-10-03: the hanging bin lands 4.0 cm from the jaws, not the
+        # 5.3 cm rim half width.
+        landing_offset=0.040,
+        preferred_reach=0.42,
+        # Camera positions that see the whole three-slot tape grid in front of the arm.
+        slot_survey_points=[(-0.02, -0.37), (-0.02, -0.55), (-0.02, -0.59)],
     ),
 ).remappings(_REMAPPINGS)
 

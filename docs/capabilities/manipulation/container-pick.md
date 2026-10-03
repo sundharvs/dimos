@@ -1,13 +1,16 @@
-# Container pick (rim grasp)
+# Container pick and place (rim grasp)
 
 A parallel-jaw gripper cannot span a bin, and a centroid grasp on an open
-container closes on air. The container pick skill grasps one **wall** by the rim
-from above, lifts, and later lowers, opens and backs the open jaws out along the
-wall before lifting away. It was learned on an xArm7 with a wrist RealSense on
-2026-10-03: 15 clean lifts in 16 attempts at 13 different bin orientations, on
-long, short, high and low (scoop-front) walls.
+container closes on air. The container skills grasp one **wall** by the rim from
+above, lift, turn the hanging container so its opening faces where it should,
+carry it over the target, lower it, open and back the open jaws out over the
+container's low end before lifting away. Learned on an xArm7 with a wrist
+RealSense on 2026-10-03: 15 clean lifts in 16 attempts at 13 bin orientations,
+then 9 of 9 placements of the bin into masking-tape slots (left, middle, right)
+with the opening toward the arm, 8 on the first try and one after a re-pick,
+with the bin scrambled by up to 120 degrees before each placement.
 
-Two modules carry it:
+Three modules carry it:
 
 - `RimGraspModule` (`dimos/manipulation/grasping/rim_grasp.py`), a `GraspGenSpec`
   provider. From the object's point cloud it takes the top band of points, fits a
@@ -16,11 +19,20 @@ Two modules carry it:
   wall. Candidates are ranked by `wall_select`: `lever` (closest to the
   footprint centroid, the default), `highest`, `lowest` (the opening of a
   scoop-front bin) or `normal` (nearest a preferred outward direction).
+- `WristTabletopModule` (`dimos/manipulation/wrist_tabletop_module.py`), a
+  `WristTabletopSpec` provider on the wrist camera's aligned colour + depth
+  frames: `scan_object_cloud` segments the container by colour and back-projects
+  it into the planning frame (no memory, unlike the scene registry, which
+  accumulates the cloud of anything re-seen within 5 cm of a stored object and so
+  corrupts repeated placements), and `add_tape_view` / `fit_slots` map masking
+  tape on the table into a named grid of slots.
 - `ContainerPickModule` (`dimos/manipulation/container_pick_module.py`), the skills
-  `survey`, `pick_up_container`, `rotate_held_container` and `set_down_container`,
-  with the motion guards described below. It needs a `ManipulationSpec`, an
-  `ObjectSceneRegistrationSpec`, a `GraspGenSpec` and, optionally, a self filter
-  that can pause the obstacle map while an object is held.
+  `survey`, `pick_up_container`, `rotate_held_container`, `place_container`,
+  `set_down_container`, `check_container_pose`, `map_slots` and
+  `place_container_in_slot`, with the motion guards described below. It needs a
+  `ManipulationSpec`, an `ObjectSceneRegistrationSpec`, a `GraspGenSpec` and,
+  optionally, a `WristTabletopSpec` (preferred for scans when present) and a self
+  filter that can pause the obstacle map while an object is held.
 
 ## Run it on the xArm7
 
@@ -30,12 +42,21 @@ dimos shell
 ```
 
 ```python
-app.ContainerPickModule.pick_up_container()          # scan, grasp a wall, lift 25 cm
-app.ContainerPickModule.rotate_held_container(45)    # optional, guarded wrist move
-app.ContainerPickModule.set_down_container()         # lower, open, back out, lift
+app.ContainerPickModule.map_slots()                        # wrist camera over the tape, fit the grid
+app.ContainerPickModule.place_container_in_slot("left")    # pick, turn, carry, set down, verify, correct
+app.ContainerPickModule.pick_up_container(turn_after_degrees=90)  # scan, grasp a wall, lift 25 cm
+app.ContainerPickModule.place_container(-0.22, -0.55, opening_yaw_degrees=90)  # opening toward +Y
+app.ContainerPickModule.check_container_pose()             # centre, heading, opening direction
+app.ContainerPickModule.set_down_container()               # back where it was picked
 app.ContainerPickModule.status()
 app.RimGraspModule.set_params(wall_select="lowest", insertion_depth=0.03)
+app.WristTabletopModule.get_slots()
 ```
+
+Slot names run from -X to +X (`left`, `middle`, `right` as seen from the table's
+front, where the scene camera stands); the opening is placed toward the slot end
+nearer the base. The tape's HSV range, the container's colour and the camera
+viewpoints for `map_slots` are blueprint parameters (`xarm-grasp-bin`).
 
 Before the first unattended run on the xArm, put a TCP box in the controller.
 It persists across power cycles and is the first line of defence:
@@ -57,8 +78,11 @@ Since then every planned motion goes through `PathGuard` before `execute`:
 - forward kinematics of **every waypoint** keeps `hand_links` inside
   `workspace_box` and `elbow_links` inside `elbow_box`;
 - `base_joint` turns at most `base_joint_max_excursion` (1 rad) along one path;
-- the joint-space path length is at most `path_max_length` (3 rad);
-- a rejected plan is cleared and never executed.
+- the joint-space path length is at most `path_max_length` (3 rad), except for a
+  pure wrist turn, which may be a half turn or more;
+- a rejected plan is cleared and never executed, and a planner exception clears
+  the pending plan so the manipulation module does not stay in PLANNING and
+  refuse every later command (seen when a wrist goal exceeded the joint limit).
 
 Translations (approach, descent, lift, carry, return) are straight-line
 Cartesian moves whose targets are box-, reach- and `min_z`-checked first; the
@@ -92,10 +116,43 @@ obstacle along the carry.
 - Vary the container's orientation between trials. One orientation hides wall
   classification and release bugs.
 
-## The research loop
+## What was learned about placing
 
-`dimos/manipulation/grasping/demo_container_pick_research.py` runs the trial
+- **The opening is the lower end wall, measured in the middle of the end.** A
+  scoop-front bin's front is cut down 4 cm, but the rim fitter's per-wall top
+  includes the corners, which belong to the full-height side walls, so it read
+  the drop as 0 to 4 cm at random and once turned the bin the wrong way round.
+  `describe_container` takes the 90th percentile height of the points within
+  3 cm of each end and the middle 60 % of the width; a drop under
+  `opening_min_drop` (1.2 cm) means "unknown", and the last known direction is
+  kept rather than guessed.
+- **The container lands closer to the jaws than the rim says.** Hanging from one
+  wall it tilts, and on touch-down its centre ends 4.0 cm from the TCP instead of
+  the 5.3 cm rim half width, consistently, on either side. `landing_offset` holds
+  the learned value; with it, placements land within 1 cm.
+- **Exit over the opening.** After the jaws open, the finger inside the container
+  cannot pass a full-height end wall: backing out over one pushed the bin 9.5 cm
+  along. Backing out over the low scoop end, 2 cm up and 5 cm past the end, never
+  moved it. `set_down_container` falls back to the old along-the-wall exit only
+  when the opening is unknown.
+- **Choose the grasp yaw for the turn that follows.** The wrist joint has +-3.1
+  rad on the xArm7, not the full turns a tool-pointing-down pose suggests. The
+  grasp yaw equivalent (yaw or yaw + pi) is chosen so the wrist is inside its
+  limits both at the grasp and after the planned turn (`wrist_feasible_yaw`).
+- **Survey with the camera, not the TCP, above the target.** The wrist camera sits
+  7 cm from the TCP; at the mirrored survey yaw that offset flips and half the
+  container leaves the frame. `survey_camera_offset` lets the module put the
+  optical centre above the target at whichever survey yaw is nearer.
+- Verification from above (rim corners inside the tape's inner edges, opening
+  toward the base) plus a re-pick with the measured error folded into the next
+  target fixes the occasional 3 cm miss in one extra round.
+
+## The research loops
+
+`dimos/manipulation/grasping/demo_container_pick_research.py` runs the lift trial
 schedule (wall selection x rotation after each lift) against a live stack, judges
 each lift by the gripper readback and, when a fixed scene camera is given, by the
 object's colour blob rising in it, and writes `trials.jsonl` plus a frame per
-step. Porting notes for another arm: [Porting the container pick to the AgileX Piper](/docs/capabilities/manipulation/porting-container-pick-piper.md).
+step. The placement research (scramble, pick, turn, place into a slot, verify from
+above, correct) was driven by the scripts kept with its artifacts under
+`~/.local/state/dimos/research/xarm7_bin_place_2026-10-03/` (README there). Porting notes for another arm: [Porting the container pick to the AgileX Piper](/docs/capabilities/manipulation/porting-container-pick-piper.md).
