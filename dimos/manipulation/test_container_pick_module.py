@@ -15,15 +15,21 @@
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from dimos.manipulation.container_pick_module import (
     ContainerPickConfig,
     PathGuard,
     inside,
+    keepout_violated,
     nearest_equivalent_yaw,
+    rotation_angle,
+    tool_rotation,
     wrap_angle,
 )
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.robot.assets.model import RobotModel
 
@@ -125,3 +131,61 @@ def test_long_joint_paths_are_rejected(guard: PathGuard) -> None:
 
 def test_empty_path_is_rejected(guard: PathGuard) -> None:
     assert guard.check_path([]) == "empty path"
+
+
+def test_tool_rotation_without_tilt_is_the_top_down_pose() -> None:
+    for yaw in (-2.0, 0.0, 0.7):
+        expected = Quaternion.from_euler(Vector3(-math.pi, 0.0, yaw)).to_rotation_matrix()
+        assert rotation_angle(tool_rotation(yaw), expected) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_tilt_keeps_the_jaw_axis_horizontal_and_leans_the_tool_along_the_wall() -> None:
+    yaw, tilt = 0.4, -0.5
+    rotation = tool_rotation(yaw, tilt)
+    # The closing axis (tool Y) has not moved: the jaws still straddle the wall.
+    assert rotation[:, 1] == pytest.approx(tool_rotation(yaw)[:, 1])
+    assert rotation[2, 1] == pytest.approx(0.0)
+    # A negative tilt raises the -X side of the tool and leans the tip toward -X.
+    assert rotation[2, 0] == pytest.approx(math.sin(tilt))
+    along = np.array([math.cos(yaw), math.sin(yaw)])
+    assert float(rotation[:2, 2] @ along) == pytest.approx(math.sin(tilt))
+    assert rotation_angle(tool_rotation(yaw), rotation) == pytest.approx(abs(tilt))
+
+
+# A 28 x 10 cm rim along world X with its top 8 cm up.
+_RIM = {
+    "rect_center": [0.30, 0.0],
+    "rect_axes": [[1.0, 0.0], [0.0, 1.0]],
+    "rect_extents": [0.28, 0.10],
+    "rim_top_z": 0.08,
+}
+# A camera 13 cm along the tool -X and 3 cm above the tool point.
+_CAMERA = [(-0.13, 0.0, -0.03)]
+
+
+def test_a_camera_beside_the_fingers_lands_on_a_long_wall_when_the_tool_is_straight_down() -> None:
+    grasp = np.array([0.30, 0.05, 0.05])  # middle of a long wall, 3 cm below the rim
+    for yaw in (0.0, math.pi):
+        assert keepout_violated(_RIM, _CAMERA, 0.03, grasp, tool_rotation(yaw))
+    # Leaned 30 degrees the camera rides 6 cm above the rim.
+    assert not keepout_violated(_RIM, _CAMERA, 0.03, grasp, tool_rotation(math.pi, -0.52))
+
+
+def test_a_camera_past_the_end_of_a_short_wall_is_clear() -> None:
+    grasp = np.array([0.16, 0.0, 0.05])  # middle of the short wall nearest the base
+    assert not keepout_violated(_RIM, _CAMERA, 0.03, grasp, tool_rotation(math.pi / 2))
+
+
+def test_reachable_finds_a_pose_the_arm_can_take_and_refuses_one_it_cannot(
+    guard: PathGuard,
+) -> None:
+    names = ["joint1", "joint2", "joint3"]
+    q = [-math.pi / 2, 0.4, 0.7]
+    pin = guard._pin
+    full = np.zeros(guard.model.nq)
+    full[:3] = q
+    pin.framesForwardKinematics(guard.model, guard.data, full)
+    pose = guard.data.oMf[guard.frames["tool"]]
+    position, rotation = np.array(pose.translation), np.array(pose.rotation)
+    assert guard.reachable(names, [-1.2, 0.2, 0.5], position, rotation)
+    assert not guard.reachable(names, q, position + np.array([0.0, 0.0, 2.0]), rotation)

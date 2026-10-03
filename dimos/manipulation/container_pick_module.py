@@ -32,6 +32,16 @@ MOTION SAFETY
     box in the robot controller as well where the SDK offers one; this module
     is the second line of defence, not the first.
 
+TILTED GRASPS
+    A small 6-DoF arm cannot hold its tool straight down far above the table
+    (the AgileX Piper's wrist pitch range ends about 11 cm up), which leaves no
+    room to clear a rim and lift. The jaws still straddle a wall when the tool
+    leans within the wall's own plane, so ``tool_tilts`` lists lean angles to
+    try and ``check_reachability`` picks, per wall, the first lean and half-turn
+    for which the pre-grasp, the grasp and the lifted pose all have an inverse
+    kinematics solution. ``survey_joints`` replaces the top-down survey pose
+    with a joint posture for a wrist camera that does not look along the tool.
+
 WHAT IT NEEDS IN THE BLUEPRINT
     A ``ManipulationSpec`` (ManipulationModule), an ``ObjectSceneRegistrationSpec``
     for prompted scans, a ``GraspGenSpec`` that proposes rim grasps
@@ -43,7 +53,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -108,6 +118,27 @@ class ContainerPickConfig(ModuleConfig):
     survey_yaw: float = -1.6
     survey_offset_xy: tuple[float, float] = (0.0, 0.07)
     survey_reach: float = 0.52
+    # A joint-space survey posture, in the planning group's joint order, for an
+    # arm whose wrist camera does not look along the tool or that cannot hold
+    # the tool straight down at survey height. The base joint is turned toward
+    # the last seen container. None keeps the Cartesian top-down survey.
+    survey_joints: list[float] | None = None
+    # "cartesian": straight-line move to the pre-grasp, then rotate in place.
+    # "plan": one guarded plan straight to the pre-grasp pose, for arms that
+    # cannot translate at the survey orientation.
+    approach: Literal["cartesian", "plan"] = "cartesian"
+    # Lean of the tool within the grasped wall's plane, radians about the jaw
+    # closing axis (the tool Y), tried in order. 0 is straight down.
+    tool_tilts: list[float] = Field(default_factory=lambda: [0.0])
+    # Choose the lean and the half-turn of the yaw by inverse kinematics of the
+    # pre-grasp, grasp and lifted poses instead of taking the first of each.
+    check_reachability: bool = False
+    # Points fixed to the tool (tip frame, metres), e.g. a wrist camera, that
+    # must stay keepout_clearance above the rim or outside it at the grasp pose.
+    tool_keepout_points: list[tuple[float, float, float]] = Field(default_factory=list)
+    keepout_clearance: float = Field(default=0.03, ge=0.0)
+    # How many of the proposed walls to try, best first.
+    max_candidates: int = Field(default=3, ge=1)
     pregrasp_offset: float = Field(default=0.10, gt=0.0)
     lift_height: float = Field(default=0.15, ge=0.0)
     hold_seconds: float = 1.5
@@ -151,8 +182,57 @@ def nearest_equivalent_yaw(yaw: float, reference: float) -> float:
     )
 
 
+def tool_rotation(yaw: float, tilt: float = 0.0) -> NDArray[np.float64]:
+    """Tool pointing down with its X axis at ``yaw``, then leaned ``tilt`` about its Y.
+
+    The jaws close along the tool Y, which stays horizontal, so a lean keeps
+    them straddling a wall that runs along the tool X.
+    """
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    ct, st = math.cos(tilt), math.sin(tilt)
+    down = np.array([[cy, sy, 0.0], [sy, -cy, 0.0], [0.0, 0.0, -1.0]])
+    lean = np.array([[ct, 0.0, st], [0.0, 1.0, 0.0], [-st, 0.0, ct]])
+    return np.asarray(down @ lean, dtype=np.float64)
+
+
+def rotation_angle(a: NDArray[np.float64], b: NDArray[np.float64]) -> float:
+    """The angle of the rotation taking orientation ``a`` to ``b``."""
+    return math.acos(max(-1.0, min(1.0, (float(np.trace(a.T @ b)) - 1.0) / 2.0)))
+
+
+def keepout_violated(
+    rim: dict[str, Any],
+    points: list[tuple[float, float, float]],
+    clearance: float,
+    grasp: NDArray[np.float64],
+    rotation: NDArray[np.float64],
+) -> bool:
+    """Whether a tool-mounted point would sit on or inside the rim at the grasp pose.
+
+    ``rim`` is RimGraspModule.describe_rim's rectangle; ``points`` are in the
+    tool frame. A point is fine ``clearance`` above the rim top, or outside the
+    rim rectangle by the same margin.
+    """
+    center = np.asarray(rim["rect_center"], dtype=float)
+    axes = np.asarray(rim["rect_axes"], dtype=float)
+    half = np.asarray(rim["rect_extents"], dtype=float) / 2.0 + clearance
+    for point in points:
+        world = grasp + rotation @ np.asarray(point, dtype=float)
+        if world[2] >= float(rim["rim_top_z"]) + clearance:
+            continue
+        if np.all(np.abs(axes @ (world[:2] - center)) <= half):
+            return True
+    return False
+
+
 class PathGuard:
     """Forward-kinematic checks of a joint path against the workspace boxes."""
+
+    # Inverse kinematics for reachable(): damped least squares from a few seeds.
+    IK_SEEDS = 8
+    IK_ITERATIONS = 150
+    IK_TOLERANCE = 1e-3
+    IK_LIMIT_MARGIN = 0.03
 
     def __init__(self, config: ContainerPickConfig) -> None:
         import pinocchio
@@ -172,6 +252,50 @@ class PathGuard:
         missing = [n for n in [*config.hand_links, *config.elbow_links] if n not in self.frames]
         if missing:
             raise ValueError(f"links not in the robot model: {missing}")
+        self.v_index = {
+            self.model.names[j]: self.model.joints[j].idx_v for j in range(1, self.model.njoints)
+        }
+
+    def reachable(
+        self,
+        names: list[str],
+        seed: list[float],
+        position: NDArray[np.float64],
+        rotation: NDArray[np.float64],
+    ) -> bool:
+        """Whether the tip link (the last hand link) can take this pose inside the joint limits.
+
+        Only the joints in ``names`` move. An answer, not a plan: it says a
+        configuration exists, not that a straight line to it does.
+        """
+        pin = self._pin
+        tip = self.frames[self.config.hand_links[-1]]
+        q_cols = [self.q_index[n] for n in names if n in self.q_index]
+        v_cols = [self.v_index[n] for n in names if n in self.v_index]
+        lower = self.model.lowerPositionLimit[q_cols] + self.IK_LIMIT_MARGIN
+        upper = self.model.upperPositionLimit[q_cols] - self.IK_LIMIT_MARGIN
+        target = pin.SE3(rotation, np.asarray(position, dtype=float))
+        rng = np.random.default_rng(0)
+        start = np.clip(
+            np.array([v for n, v in zip(names, seed, strict=False) if n in self.q_index]),
+            lower,
+            upper,
+        )
+        for attempt in range(self.IK_SEEDS):
+            q = np.zeros(self.model.nq)
+            q[q_cols] = start if attempt == 0 else rng.uniform(lower, upper)
+            for _ in range(self.IK_ITERATIONS):
+                pin.forwardKinematics(self.model, self.data, q)
+                pin.updateFramePlacements(self.model, self.data)
+                error = pin.log(self.data.oMf[tip].actInv(target)).vector
+                if float(np.linalg.norm(error)) < self.IK_TOLERANCE:
+                    return True
+                jacobian = pin.computeFrameJacobian(self.model, self.data, q, tip, pin.LOCAL)[
+                    :, v_cols
+                ]
+                step = jacobian.T @ np.linalg.solve(jacobian @ jacobian.T + 1e-4 * np.eye(6), error)
+                q[q_cols] = np.clip(q[q_cols] + 0.5 * step, lower, upper)
+        return False
 
     def link_positions(
         self, names: list[str], positions: list[float]
@@ -263,6 +387,8 @@ class ContainerPickModule(Module):
         Goes above the last seen container when there is one, by straight-line
         moves at reduced speed, then restores the top-down wrist orientation.
         """
+        if self.config.survey_joints is not None:
+            return self._survey_by_joints(list(self.config.survey_joints))
         target = self._survey_target()
         failure = self._cartesian_to(target)
         if failure is not None:
@@ -302,37 +428,60 @@ class ContainerPickModule(Module):
             return SkillResult.fail("GRASP_GENERATION_FAILED", "No rim grasp in the planning frame")
         current_yaw = self._tcp_yaw()
         attempts: list[dict[str, Any]] = []
-        for candidate in candidates.candidates[:3]:
+        for candidate in candidates.candidates[: self.config.max_candidates]:
             position = candidate.pose.position
             grasp_z = float(position.z)
             if self.config.min_z is not None:
                 grasp_z = max(grasp_z, self.config.min_z)
-            yaw = nearest_equivalent_yaw(
-                float(candidate.pose.orientation.to_euler().z), current_yaw
-            )
             grasp = np.array([float(position.x), float(position.y), grasp_z])
             pregrasp = grasp + np.array([0.0, 0.0, self.config.pregrasp_offset])
-            failure = self._cartesian_to(pregrasp)
-            if failure is not None:
+            wall_yaw = float(candidate.pose.orientation.to_euler().z)
+            choice = self._choose_tool_pose(grasp, wall_yaw, current_yaw)
+            if choice is None:
                 attempts.append(
                     {
                         "grasp": grasp.tolist(),
-                        "yaw": yaw,
-                        "step": "approach",
-                        "error": failure.message,
+                        "yaw": wall_yaw,
+                        "step": "reach",
+                        "error": "no reachable tool orientation clears the rim",
                     }
                 )
                 continue
-            if not self._rotate_to(yaw, pregrasp):
-                attempts.append(
-                    {
-                        "grasp": grasp.tolist(),
-                        "yaw": yaw,
-                        "step": "rotate",
-                        "error": "plan rejected",
-                    }
-                )
-                continue
+            yaw, tilt = choice
+            if self.config.approach == "plan":
+                if not self._plan_to(pregrasp, yaw, tilt):
+                    attempts.append(
+                        {
+                            "grasp": grasp.tolist(),
+                            "yaw": yaw,
+                            "tilt": tilt,
+                            "step": "approach",
+                            "error": "plan rejected",
+                        }
+                    )
+                    continue
+            else:
+                failure = self._cartesian_to(pregrasp)
+                if failure is not None:
+                    attempts.append(
+                        {
+                            "grasp": grasp.tolist(),
+                            "yaw": yaw,
+                            "step": "approach",
+                            "error": failure.message,
+                        }
+                    )
+                    continue
+                if not self._plan_to(pregrasp, yaw, tilt):
+                    attempts.append(
+                        {
+                            "grasp": grasp.tolist(),
+                            "yaw": yaw,
+                            "step": "rotate",
+                            "error": "plan rejected",
+                        }
+                    )
+                    continue
             failure = self._cartesian_to(grasp)
             if failure is not None:
                 attempts.append(
@@ -369,6 +518,7 @@ class ContainerPickModule(Module):
                 "object_id": object_id,
                 "grasp": grasp.tolist(),
                 "grasp_yaw": yaw,
+                "tilt": tilt,
                 "footprint": footprint,
                 "closed_reading": reading.position,
             }
@@ -385,6 +535,7 @@ class ContainerPickModule(Module):
                 object_id=object_id,
                 grasp=grasp.tolist(),
                 yaw=yaw,
+                tilt=tilt,
                 gripper=held,
                 footprint=footprint,
                 attempts=attempts,
@@ -427,8 +578,7 @@ class ContainerPickModule(Module):
             return failure
         self._gripper_to(self.config.grasp_verification.open_position)
         # Back out along the wall past the container's end, then lift.
-        yaw = self._tcp_yaw()
-        along = np.array([math.cos(yaw), math.sin(yaw)])
+        along = self._tool_x_horizontal()
         length = float(max(footprint.get("extents", [0.3, 0.1])))
         distance = length / 2.0 + self.config.slide_margin
         tcp = self._tcp()
@@ -438,6 +588,7 @@ class ContainerPickModule(Module):
             if (
                 inside(np.array([end[0], end[1], tcp[2]]), self.config.workspace_box)
                 and math.hypot(end[0], end[1]) <= self.config.reach_max - 0.06
+                and self._reachable_here(np.array([end[0], end[1], tcp[2]]))
             ):
                 options.append((math.hypot(end[0], end[1]), sign))
         slid = False
@@ -460,6 +611,12 @@ class ContainerPickModule(Module):
         """
         if self._holding is None:
             return SkillResult.fail("INVALID_STATE", "Nothing is held")
+        if abs(float(self._holding.get("tilt", 0.0))) > 0.05:
+            # The wrist axis is not vertical when the tool leans.
+            return SkillResult.fail(
+                "INVALID_STATE",
+                "A container held with a leaning tool cannot be turned by the wrist",
+            )
         before = self._tcp_yaw()
         names, positions = self._joints()
         if self.config.wrist_joint not in names:
@@ -595,14 +752,17 @@ class ContainerPickModule(Module):
         execution = self._manipulation.execute(blocking=True)
         return bool(execution.succeeded)
 
-    def _rotate_to(self, yaw: float, position: NDArray[np.float64]) -> bool:
-        """Rotate the wrist in place to ``yaw`` (tool pointing down) with a checked plan."""
-        if abs(wrap_angle(yaw - self._tcp_yaw())) < 0.05:
+    def _plan_to(self, position: NDArray[np.float64], yaw: float, tilt: float = 0.0) -> bool:
+        """Move the tool to a pose (pointing down at ``yaw``, leaned ``tilt``) with a checked plan."""
+        rotation = tool_rotation(yaw, tilt)
+        pose_now = self._state().end_effector_pose
+        turned = rotation_angle(pose_now.orientation.to_rotation_matrix(), rotation)
+        if turned < 0.05 and float(np.linalg.norm(self._tcp() - position)) < 0.02:
             return True
         pose = PoseStamped(
             frame_id=self.config.planning_frame,
             position=Vector3(*position.tolist()),
-            orientation=Quaternion.from_euler(Vector3(-math.pi, 0.0, yaw)),
+            orientation=Quaternion.from_rotation_matrix(rotation),
         )
         plan = self._manipulation.plan_to_poses(
             {self._require_group(): pose}, speed_scale=self.config.plan_speed_scale
@@ -610,7 +770,89 @@ class ContainerPickModule(Module):
         return self._execute_checked(plan)
 
     def _face_down(self) -> bool:
-        return self._rotate_to(self.config.survey_yaw, self._tcp())
+        return self._plan_to(self._tcp(), self.config.survey_yaw)
+
+    def _survey_by_joints(self, target: list[float]) -> SkillResult[ManipulationSkillError]:
+        names, positions = self._joints()
+        if len(target) != len(names):
+            return SkillResult.fail(
+                "INVALID_STATE", f"survey_joints needs {len(names)} values (got {len(target)})"
+            )
+        footprint = (self._holding or self._last or {}).get("footprint")
+        if footprint and self.config.base_joint in names:
+            target[names.index(self.config.base_joint)] = math.atan2(
+                footprint["cy"], footprint["cx"]
+            )
+        if max(abs(a - b) for a, b in zip(target, positions, strict=True)) < 0.01:
+            return SkillResult.ok("At survey pose", joints=target)
+        plan = self._manipulation.plan_to_joints(
+            {self._require_group(): JointState(name=names, position=target)},
+            speed_scale=self.config.plan_speed_scale,
+        )
+        if not self._execute_checked(plan):
+            return SkillResult.fail("PLANNING_FAILED", "Survey move rejected by the guards")
+        return SkillResult.ok("At survey pose", joints=target)
+
+    def _choose_tool_pose(
+        self, grasp: NDArray[np.float64], wall_yaw: float, current_yaw: float
+    ) -> tuple[float, float] | None:
+        """The (yaw, tilt) to grasp this wall with, or None when no option works."""
+        config = self.config
+        if not config.check_reachability:
+            return nearest_equivalent_yaw(wall_yaw, current_yaw), config.tool_tilts[0]
+        assert self._guard is not None
+        names, seed = self._joints()
+        up = np.array([0.0, 0.0, 1.0])
+        poses = [
+            grasp + up * config.pregrasp_offset,
+            grasp,
+            grasp + up * (config.pregrasp_offset + config.lift_height),
+        ]
+        radial = grasp[:2] / max(float(np.linalg.norm(grasp[:2])), 1e-9)
+        for tilt in config.tool_tilts:
+            yaws = [wrap_angle(wall_yaw), wrap_angle(wall_yaw + math.pi)]
+            if abs(tilt) > 1e-6:
+                # The tool tip leans toward sin(tilt) * X: prefer leaning away
+                # from the base, which is where the reach is.
+                yaws.sort(
+                    key=lambda y: -math.sin(tilt)
+                    * float(np.dot([math.cos(y), math.sin(y)], radial))
+                )
+            else:
+                yaws.sort(key=lambda y: abs(wrap_angle(y - current_yaw)))
+            for yaw in yaws:
+                rotation = tool_rotation(yaw, tilt)
+                if self._keepout_violated(grasp, rotation):
+                    continue
+                if all(self._guard.reachable(names, seed, p, rotation) for p in poses):
+                    return yaw, tilt
+        return None
+
+    def _keepout_violated(self, grasp: NDArray[np.float64], rotation: NDArray[np.float64]) -> bool:
+        rim = self._last.get("rim")
+        if not rim:
+            return False
+        return keepout_violated(
+            rim,
+            self.config.tool_keepout_points,
+            self.config.keepout_clearance,
+            grasp,
+            rotation,
+        )
+
+    def _tool_x_horizontal(self) -> NDArray[np.float64]:
+        """Unit horizontal direction of the tool X axis: along the grasped wall."""
+        x_axis = self._state().end_effector_pose.orientation.to_rotation_matrix()[:2, 0]
+        return np.asarray(x_axis / max(float(np.linalg.norm(x_axis)), 1e-9), dtype=float)
+
+    def _reachable_here(self, position: NDArray[np.float64]) -> bool:
+        """Whether the tool can be at ``position`` in its present orientation."""
+        if not self.config.check_reachability:
+            return True
+        assert self._guard is not None
+        names, seed = self._joints()
+        rotation = self._state().end_effector_pose.orientation.to_rotation_matrix()
+        return self._guard.reachable(names, seed, position, rotation)
 
     def _scan(
         self, prompts: list[str] | None
@@ -637,7 +879,7 @@ class ContainerPickModule(Module):
                     return object_id, points, cloud
                 last_error = why
                 # re-centre the survey over what was seen and look again
-                self._cartesian_to(self._survey_target())
+                self.survey()
             time.sleep(0.5)
         return SkillResult.fail("OBJECT_NOT_DETECTED", f"No usable container: {last_error}")
 
