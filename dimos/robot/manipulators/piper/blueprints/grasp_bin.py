@@ -69,9 +69,13 @@ from dimos.robot.manipulators.piper.config import (
 )
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 
-# The wrist camera looks down from about 39 cm above the base plane, 35 cm out,
-# which shows a 28 cm bin whole. Joint 1 is turned toward the container.
-PIPER_BIN_SURVEY_JOINTS = [0.0, 1.05, -1.18, 0.0, 1.10, 0.0]
+# Two looks straight down, the camera 35 cm up and 27 cm out, then 41 cm up and
+# 42 cm out, with joint 1 turned toward the container. The image's short side
+# runs radially and spans under 30 cm at rim height, so a bin lying along a
+# radius does not fit in one view; the two clouds are merged. No posture rolls
+# the camera a quarter turn about its axis.
+PIPER_BIN_SURVEY_JOINTS = [0.0, 0.75, -0.88, 0.0, 1.15, 0.0]
+PIPER_BIN_SURVEY_FAR_JOINTS = [0.0, 1.33, -1.46, 0.0, 1.15, 0.0]
 
 # The lowest tool point: straight down, fingertips 1 cm above the table.
 PIPER_BIN_MIN_Z = PIPER_GRASP_TABLE_Z + PIPER_FINGERTIPS_PAST_TCP + 0.01
@@ -109,9 +113,12 @@ _model = make_piper_model_config(home_joints=PIPER_GRASP_SCAN_JOINTS, tcp=True).
         "tf_extra_links": PIPER_COLLISION_LINKS,
     }
 )
-# A thin wall leaves the jaws almost closed; see GraspVerificationConfig for
-# how to place empty_epsilon between an empty close and a close on the wall.
-_grasp_verification = GraspVerificationConfig(open_tolerance=0.2, empty_epsilon=0.012)
+# A thin wall leaves the jaws almost closed. Measured 2026-10-03 on a 30 x 11 cm
+# shelf bin: an empty close read exactly 0.0 eight times out of eight, a close
+# on the wall anything from 0.002 to 0.019 (0.16 to 1.5 mm of travel), and the
+# reading moves either way once the bin hangs from the jaws. So any travel left
+# at all means the wall is in them. It is a thin margin: look as well.
+_grasp_verification = GraspVerificationConfig(open_tolerance=0.2, empty_epsilon=0.001)
 
 piper_grasp_bin = autoconnect(
     ManipulationModule.blueprint(
@@ -128,7 +135,12 @@ piper_grasp_bin = autoconnect(
         min_place_z=PIPER_GRASP_TABLE_Z + PIPER_FINGERTIPS_PAST_TCP,
         grasp_verification=_grasp_verification,
     ),
-    RimGraspModule.blueprint(min_z=PIPER_BIN_MIN_Z),
+    RimGraspModule.blueprint(
+        min_z=PIPER_BIN_MIN_Z,
+        # A scoop-front bin's low front lip lies outside the rim rectangle, so
+        # the candidate on that side is over the bin's floor: try it last.
+        wall_select="highest",
+    ),
     ContainerPickModule.blueprint(
         model=_model.model,
         planning_frame="world",
@@ -147,6 +159,7 @@ piper_grasp_bin = autoconnect(
         plan_speed_scale=0.2,
         cartesian_speed_scale=0.2,
         survey_joints=PIPER_BIN_SURVEY_JOINTS,
+        survey_extra_views=[PIPER_BIN_SURVEY_FAR_JOINTS],
         approach="plan",
         tool_tilts=PIPER_BIN_TOOL_TILTS,
         check_reachability=True,

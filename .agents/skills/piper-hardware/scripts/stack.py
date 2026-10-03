@@ -18,10 +18,14 @@
     python .agents/skills/piper-hardware/scripts/stack.py restart piper-grasp
     python .agents/skills/piper-hardware/scripts/stack.py status
     python .agents/skills/piper-hardware/scripts/stack.py stop
+    python .agents/skills/piper-hardware/scripts/stack.py park
 
 ``start`` launches the blueprint detached, waits until it reports ready or dies,
-and prints why when it dies. ``stop`` also removes what a killed stack leaves
-behind. Settings that belong to one rig (PIPER_JOINT_OFFSETS_DEG,
+and prints why when it dies. ``stop`` and ``restart`` first park the arm in its
+rest posture with a planned move and refuse to go on when that fails
+(``--no-park`` skips it): a stack killed with the arm stretched out leaves the
+adapter's own homing half done, and the next connect drops the limp arm onto
+whatever is under it. ``stop`` also removes what a killed stack leaves behind. Settings that belong to one rig (PIPER_JOINT_OFFSETS_DEG,
 PIPER_JUDGE_CAN) come from ``rig.ignore.env`` in the skill folder, a git-ignored
 file of KEY=VALUE lines.
 """
@@ -40,6 +44,8 @@ import psutil
 
 from dimos.constants import DIMOS_PROJECT_ROOT, STATE_DIR
 from dimos.core.run_registry import get_most_recent, stop_entry
+from dimos.msgs.sensor_msgs.JointState import JointState
+from dimos.porcelain.dimos import Dimos
 
 RIG_ENV = Path(__file__).resolve().parent.parent / "rig.ignore.env"
 LAUNCH_LOG = STATE_DIR / "piper-hardware" / "launch.log"
@@ -50,6 +56,13 @@ START_TIMEOUT_S = 900.0
 POLL_INTERVAL_S = 1.0
 LEFTOVER_GRACE_S = 3.0
 ERROR_LINES_SHOWN = 15
+# The rest posture, a little inside the limits joints 2 and 3 rest against.
+PARK_JOINTS = [0.0, 0.03, -0.03, 0.0, 0.08, 0.0]
+PARKED_TOLERANCE_RAD = 0.12
+# Below this the tool may be inside or beside an object: go straight up first.
+PARK_CLEAR_Z = 0.20
+PARK_SPEED_SCALE = 0.3
+CONNECT_TIMEOUT_S = 15.0
 
 
 def rig_environment() -> dict[str, str]:
@@ -138,14 +151,61 @@ def start(blueprint: str, can_port: str) -> bool:
     return False
 
 
-def stop() -> None:
+def park() -> bool:
+    """Bring the arm to its rest posture through the running stack. True when it is there."""
+    try:
+        app = Dimos.connect(timeout=CONNECT_TIMEOUT_S)
+    except Exception as error:
+        print(f"park: cannot reach the stack ({error})")
+        return False
+    try:
+        manipulation = app.ManipulationModule
+
+        def group() -> tuple[object, object]:
+            return next(iter(manipulation.get_state().groups.items()))
+
+        def away(state: object) -> float:
+            return max(abs(a - b) for a, b in zip(state.joints.position, PARK_JOINTS, strict=True))
+
+        group_id, state = group()
+        if away(state) > PARKED_TOLERANCE_RAD:
+            rise = PARK_CLEAR_Z - float(state.end_effector_pose.position.z)
+            if rise > 0.005:
+                # Best effort: the tool cannot always go straight up this far.
+                manipulation.move_linear(0.0, 0.0, rise, speed_scale=PARK_SPEED_SCALE)
+            names = list(group()[1].joints.name)
+            plan = manipulation.plan_to_joints(
+                {group_id: JointState(name=names, position=PARK_JOINTS)},
+                speed_scale=PARK_SPEED_SCALE,
+            )
+            if plan.succeeded:
+                manipulation.execute(blocking=True)
+            time.sleep(1.0)
+        distance = away(group()[1])
+        if distance > PARKED_TOLERANCE_RAD:
+            print(f"park: arm is {distance:.2f} rad from its rest posture")
+            return False
+        print("parked")
+        return True
+    except Exception as error:
+        print(f"park: failed ({error})")
+        return False
+    finally:
+        app.stop()
+
+
+def stop(park_first: bool = True) -> bool:
     running = get_most_recent()
     if running is None:
         print("no stack running")
     else:
+        if park_first and not park():
+            print("not stopping: park the arm by hand or with RPC, or pass --no-park")
+            return False
         message, _ = stop_entry(running)
         print(f"{running.blueprint}: {message}")
     _remove_leftovers()
+    return True
 
 
 def status(can_port: str) -> None:
@@ -159,16 +219,25 @@ def status(can_port: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["start", "stop", "restart", "status"])
+    parser.add_argument("command", choices=["start", "stop", "restart", "status", "park"])
     parser.add_argument("blueprint", nargs="?", default=DEFAULT_BLUEPRINT)
     parser.add_argument("--can-port", default="can0")
+    parser.add_argument(
+        "--no-park",
+        action="store_true",
+        help="stop without parking first (only when the arm is already at rest or held)",
+    )
     args = parser.parse_args()
 
     if args.command == "status":
         status(args.can_port)
         return
-    if args.command in ("stop", "restart"):
-        stop()
+    if args.command == "park":
+        if not park():
+            raise SystemExit(1)
+        return
+    if args.command in ("stop", "restart") and not stop(park_first=not args.no_park):
+        raise SystemExit(1)
     if args.command in ("start", "restart") and not start(args.blueprint, args.can_port):
         raise SystemExit(1)
 

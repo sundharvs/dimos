@@ -123,6 +123,10 @@ class ContainerPickConfig(ModuleConfig):
     # the tool straight down at survey height. The base joint is turned toward
     # the last seen container. None keeps the Cartesian top-down survey.
     survey_joints: list[float] | None = None
+    # More joint postures to look from after the survey, for a container that
+    # does not fit in one view: what each sees of the container is merged
+    # before the rim is fitted. The base joint follows the container here too.
+    survey_extra_views: list[list[float]] = Field(default_factory=list)
     # "cartesian": straight-line move to the pre-grasp, then rotate in place.
     # "plan": one guarded plan straight to the pre-grasp pose, for arms that
     # cannot translate at the survey orientation.
@@ -377,6 +381,43 @@ class ContainerPickModule(Module):
             setattr(self.config, key, value)
         self._guard = PathGuard(self.config)
         return self.config.model_dump(exclude={"model"})
+
+    @rpc
+    def preview(self, prompt: str = "") -> dict[str, Any]:
+        """Survey and scan, then report the rim and how each wall would be grasped.
+
+        Moves only to the survey postures. For bring-up: check the rim size and
+        the chosen yaw and lean per wall before the first pick.
+        """
+        survey = self.survey()
+        if not survey.success:
+            return {"error": survey.message}
+        scan = self._scan([prompt] if prompt.strip() else None)
+        if isinstance(scan, SkillResult):
+            return {"error": scan.message}
+        object_id, points, cloud = scan
+        current_yaw = self._tcp_yaw()
+        walls = []
+        for candidate in self._grasps.propose_grasps(cloud).candidates:
+            position = candidate.pose.position
+            grasp = np.array([float(position.x), float(position.y), float(position.z)])
+            if self.config.min_z is not None:
+                grasp[2] = max(grasp[2], self.config.min_z)
+            wall_yaw = float(candidate.pose.orientation.to_euler().z)
+            walls.append(
+                {
+                    "grasp": np.round(grasp, 4).tolist(),
+                    "wall_yaw": wall_yaw,
+                    "score": float(candidate.score),
+                    "tool": self._choose_tool_pose(grasp, wall_yaw, current_yaw),
+                }
+            )
+        return {
+            "object_id": object_id,
+            "footprint": self._footprint(points),
+            "rim": self._last.get("rim"),
+            "walls": walls,
+        }
 
     # skills
 
@@ -874,6 +915,11 @@ class ContainerPickModule(Module):
                     continue
                 footprint = self._footprint(points)
                 self._last = {**self._last, "footprint": footprint}
+                if self.config.survey_extra_views:
+                    cloud = self._add_views(cloud, prompts)
+                    points = cloud.points_f32()
+                    footprint = self._footprint(points)
+                    self._last = {**self._last, "footprint": footprint}
                 plausible, why = self._plausible(cloud)
                 if plausible:
                     return object_id, points, cloud
@@ -882,6 +928,31 @@ class ContainerPickModule(Module):
                 self.survey()
             time.sleep(0.5)
         return SkillResult.fail("OBJECT_NOT_DETECTED", f"No usable container: {last_error}")
+
+    def _add_views(self, cloud: Any, prompts: list[str]) -> Any:
+        """Look from each extra posture and merge what it shows of the same container."""
+        center = np.median(cloud.points_f32()[:, :2], axis=0)
+        for view in self.config.survey_extra_views:
+            if not self._survey_by_joints(list(view)).success:
+                logger.warning("Container pick: extra survey view rejected; skipping it")
+                continue
+            try:
+                detections = self._scene.scan_scene(text=prompts)
+            except RuntimeError as exc:
+                logger.warning(f"Container pick: extra view scan failed: {exc}")
+                continue
+            best: Any = None
+            for detection in detections.detections[: detections.detections_length]:
+                seen = self._scene.get_object_pointcloud_by_object_id(str(detection.id))
+                if seen is None or len(seen.points_f32()) < 50:
+                    continue
+                # The same container, not something else that matched the prompt.
+                offset = np.linalg.norm(np.median(seen.points_f32()[:, :2], axis=0) - center)
+                if offset < 0.25 and (best is None or len(seen) > len(best)):
+                    best = seen
+            if best is not None:
+                cloud = cloud + best
+        return cloud
 
     def _plausible(self, cloud: Any) -> tuple[bool, str]:
         describe = getattr(self._grasps, "describe_rim", None)

@@ -124,3 +124,53 @@ frames: they are what makes the next port faster.
 Time budget that held on the xArm: calibration 2 h (first time), skill
 bring-up 1 h, 16 trials 1 h. Most of the lost time was spent on motions that
 were not checked before execution. Do the checks first.
+
+## 6. What the Piper run found (2026-10-03)
+
+Run it with `dimos run piper-grasp-bin --can-port can0`
+(`dimos/robot/manipulators/piper/blueprints/grasp_bin.py`). Section 0 above
+underestimated three things about this arm:
+
+- **The tool cannot point straight down above about 11 cm**, and the wrist
+  camera sits 13 cm along the tool X, 3 cm above the tool point, where a long
+  wall would be. The tool therefore leans 30 deg within the grasped wall's plane
+  (`tool_tilts`), fingertips away from the base, which only buys height on walls
+  that run roughly radially. `check_reachability` picks the wall, the lean and
+  the yaw half-turn by inverse kinematics; `tool_keepout_points` keeps the camera
+  off the rim. Tangential walls are skipped, so some wall is always tried last.
+- **The camera does not look along the tool and cannot be rolled a quarter
+  turn**, and its short image side runs radially. The survey is two joint
+  postures (`survey_joints`, `survey_extra_views`) whose clouds are merged.
+- **The jaw readback barely sees a thin wall**: an empty close read exactly 0.0
+  eight times out of eight, a close on the wall 0.002 to 0.019. `empty_epsilon`
+  is 0.001. At 0.012 a held bin was reported as slipped, at 0.002 a wall in the
+  jaws was reported as nothing.
+
+Trials, each judged from the scene camera's frames as well as the readback. The
+bin is a 30 x 11 x 9 cm scoop-front shelf bin lying across the table or up to
+65 deg from that; every grasp was on a short wall, so the bin hangs steeply
+from one end and its low end may still touch the table on the 16 cm lift.
+
+| trial | wall grasped (x, y, z) | close / lifted readback | outcome |
+|---|---|---|---|
+| 1 | back, (0.33, -0.13, 0.05) | 0.019 / 0.004 | lifted; reported as slipped (`empty_epsilon` 0.012), set down by hand over RPC |
+| 2 | (0.38, -0.14, 0.07) | 0.003 / 0.014 | lifted, set down |
+| 3 | (0.19, -0.20, 0.06) | 0.002 | jaws on the wall, reported as nothing (`empty_epsilon` 0.002); next wall's plan rejected |
+| 4 | (0.19, -0.20, 0.05) | 0.006 / 0.012 | lifted, set down |
+| 5 | (0.23, -0.11, 0.05) | 0.004 / 0.012 | lifted, set down |
+| 6 | (0.24, -0.22, 0.06) | 0.005 / 0.014 | lifted, set down |
+
+Not yet done: a bin lying along a radius (long-wall grasp, which should hang
+level), the scoop-front wall (its lip lies outside the rim rectangle, so that
+candidate is over the bin's floor), `rotate_held_container` with a leaning tool
+(refused), rim-size plausibility limits, and the research script's schedule.
+
+**Park before stopping.** A restart with the arm stretched out over the bin
+ended with the arm limp on the bin and then over the table's side: the stop
+SIGKILLs after 5 s with the adapter's homing half done and the next connect
+disables the motors. `stack.py stop` / `restart` now park first.
+
+Cost of the port up to trial 6: 30 minutes of wall time from the first command
+(15:33 to 16:03), 75 model calls, 108 k output tokens, 243 k fresh input
+tokens and 14.0 M cached input tokens re-read across calls. The first lift came
+20 minutes in (80 k output tokens).
