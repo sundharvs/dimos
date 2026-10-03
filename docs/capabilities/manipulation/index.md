@@ -502,6 +502,9 @@ planner is locked for its whole native call.
 | `r1pro-planar-preview` | R1 Pro planar-base, torso, and bimanual planning preview with fake hardware |
 | [`xarm-grasp`](/docs/capabilities/manipulation/xarm-grasp.md) | XArm7 grasping stack, on hardware or in MuJoCo |
 | `xarm-grasp-agent` | The grasping stack + LLM agent |
+| [`xarm7-hand-eye-calibration`](/docs/capabilities/manipulation/xarm-grasp.md#calibrating-the-wrist-camera) | XArm7 wrist-camera calibration against a ChArUco board |
+| [`xarm7-side-camera-calibration`](/docs/capabilities/manipulation/xarm-grasp.md#a-fixed-scene-camera) | Fixed side ZED 2i calibration (eye-to-hand) against the XArm7 |
+| [`piper-hand-eye-calibration`](/docs/capabilities/manipulation/xarm-grasp.md#calibrating-the-wrist-camera) | Piper wrist-RealSense calibration (`link6 -> camera_link`), same tool and keys as the XArm7's |
 | `xarm-perception-sim` | XArm7 simulation perception stack |
 | [`xarm-perception-sim-agent`](/docs/capabilities/manipulation/agentic.md) | XArm7 simulation perception stack + LLM agent |
 
@@ -529,6 +532,7 @@ planner is locked for its whole native call.
 | [`robot/manipulators/a750/blueprints/teleop.py`](/dimos/robot/manipulators/a750/blueprints/teleop.py) | A-750 keyboard teleop blueprint |
 | [`robot/manipulators/piper/blueprints/basic.py`](/dimos/robot/manipulators/piper/blueprints/basic.py) | Piper coordinator blueprint |
 | [`robot/manipulators/piper/blueprints/teleop.py`](/dimos/robot/manipulators/piper/blueprints/teleop.py) | Piper teleop blueprints |
+| [`robot/manipulators/piper/blueprints/calibration.py`](/dimos/robot/manipulators/piper/blueprints/calibration.py) | Piper wrist-camera hand-eye calibration |
 | [`robot/manipulators/xarm/blueprints/basic.py`](/dimos/robot/manipulators/xarm/blueprints/basic.py) | XArm coordinator and planner blueprints |
 | [`robot/manipulators/xarm/blueprints/grasp.py`](/dimos/robot/manipulators/xarm/blueprints/grasp.py) | XArm grasping blueprints, hardware or MuJoCo |
 | [`teleop/keyboard/keyboard_teleop_module.py`](/dimos/teleop/keyboard/keyboard_teleop_module.py) | Keyboard teleop module |
