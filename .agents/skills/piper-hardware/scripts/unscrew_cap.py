@@ -24,7 +24,10 @@ body in the scene camera's frame, as x0,y0,x1,y1 pixels.
 The gripper comes straight down on the cap and turns it counter-clockwise with
 joint 6, re-gripping between strokes. After each stroke it lifts with the cap
 still held and compares the watched pixels before and after: a bottle that moved
-is still attached to its cap, one that stayed has let go of it. Needs piper-grasp
+is still attached to its cap. A bottle that stayed has let go of it only if the
+jaws still hold something; empty jaws mean either that the pads slipped off a
+cap that is still on, or that a freed cap fell, so the arm retracts and looks
+for a cap on top of the bottle before gripping anything again. Needs piper-grasp
 running, timelapse.py recording, and the bottle held against turning; the cap
 top must be within about 10 cm of the arm's base height for the gripper to point
 straight down at it (see piper_reach.py).
@@ -70,6 +73,14 @@ FRAME_AGE_S = 1.5
 MOVED_THRESHOLD = 15.0
 SETTLE_TOLERANCE_RAD = 0.001
 SETTLE_TIMEOUT_S = 2.0
+# Jaws closed further than this normalized opening are holding nothing.
+EMPTY_JAWS = 0.1
+# Where the wrist camera sees the top of an object standing in front of the arm.
+VIEW_JOINTS = (0.0, 0.5, -0.9, 0.0, 1.2, 0.0)
+VIEW_SETTLE_S = 1.5
+# A detected cap this close to where the cap was is still on the bottle.
+ON_BOTTLE_RADIUS_M = 0.03
+ON_BOTTLE_HEIGHT_M = 0.03
 
 
 class Arm:
@@ -110,13 +121,16 @@ class Arm:
         plan = self._motion.plan_to_poses({self._group: target}, 0.5)
         self._run(plan.message, plan.succeeded)
 
-    def wrist_to(self, angle: float, speed: float) -> None:
-        joints = self.joints()
-        joints[5] = angle
+    def to_joints(self, joints: NDArray[np.float64], speed: float) -> None:
         names = [f"joint{index}" for index in range(1, 7)]
         target = JointState(name=names, position=[float(q) for q in joints])
         plan = self._motion.plan_to_joints({self._group: target}, speed)
         self._run(plan.message, plan.succeeded)
+
+    def wrist_to(self, angle: float, speed: float) -> None:
+        joints = self.joints()
+        joints[5] = angle
+        self.to_joints(joints, speed)
 
     def raise_by(self, dz: float) -> None:
         result = self._motion.move_linear(0.0, 0.0, dz, self._group, check_collision=False)
@@ -139,6 +153,24 @@ def watched_pixels(box: tuple[int, int, int, int]) -> NDArray[np.float32]:
     return cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(np.float32)
 
 
+def cap_on_bottle(app: Dimos, x: float, y: float, top: float, prompt: str) -> bool:
+    """Whether the wrist camera, from the viewing pose, finds a cap where it was."""
+    time.sleep(VIEW_SETTLE_S)
+    for _ in range(2):
+        found = app.PickAndPlaceModule.scan_objects([prompt]).metadata.get("objects", [])
+        for detected in found:
+            cloud = app.ObjectSceneRegistrationModule.get_object_pointcloud_by_object_id(
+                detected["object_id"]
+            )
+            cx, cy, cz = np.median(cloud.points_f32(), axis=0)
+            if (
+                math.hypot(cx - x, cy - y) < ON_BOTTLE_RADIUS_M
+                and abs(cz - top) < ON_BOTTLE_HEIGHT_M
+            ):
+                return True
+    return False
+
+
 def parse_box(text: str) -> tuple[int, int, int, int]:
     x0, y0, x1, y1 = (int(value) for value in text.split(","))
     return x0, y0, x1, y1
@@ -150,29 +182,47 @@ def main() -> None:
     parser.add_argument("y", type=float, help="cap centre y, metres")
     parser.add_argument("top", type=float, help="height of the cap's top, metres")
     parser.add_argument("--watch", type=parse_box, required=True, help="x0,y0,x1,y1 pixels")
+    parser.add_argument("--prompt", default="bottle cap", help="what the detector calls the cap")
     args = parser.parse_args()
 
     app = Dimos.connect(timeout=CONNECT_TIMEOUT_S)
     try:
         arm = Arm(app)
-        arm.grip(1.0)
-        arm.to_pose_above(args.x, args.y, args.top + APPROACH_ABOVE_TOP)
-        arm.wrist_to(WRIST_START_RAD, speed=0.5)
-        arm.raise_by(args.top + GRIP_ABOVE_TOP - arm.tool_height())
 
+        def onto_cap() -> None:
+            arm.grip(1.0)
+            arm.to_pose_above(args.x, args.y, args.top + APPROACH_ABOVE_TOP)
+            arm.wrist_to(WRIST_START_RAD, speed=0.5)
+            arm.raise_by(args.top + GRIP_ABOVE_TOP - arm.tool_height())
+
+        onto_cap()
         for stroke in range(1, MAX_STROKES + 1):
             held = arm.grip(0.0)
-            arm.wrist_to(WRIST_END_RAD, speed=TWIST_SPEED)
-            before = watched_pixels(args.watch)
-            arm.raise_by(LIFT_CHECK_M)
-            change = float(np.abs(watched_pixels(args.watch) - before).mean())
-            print(f"stroke {stroke}: jaws at {held:.3f}, bottle changed by {change:.1f} on lifting")
-            if change < MOVED_THRESHOLD:
-                print(f"cap is off after {stroke} stroke(s); the gripper is holding it")
-                return
-            arm.raise_by(-LIFT_CHECK_M)
+            if held >= EMPTY_JAWS:
+                arm.wrist_to(WRIST_END_RAD, speed=TWIST_SPEED)
+                before = watched_pixels(args.watch)
+                arm.raise_by(LIFT_CHECK_M)
+                change = float(np.abs(watched_pixels(args.watch) - before).mean())
+                holding = arm.gripper_opening() >= EMPTY_JAWS
+                print(
+                    f"stroke {stroke}: gripped at {held:.3f}; on lifting the bottle changed by "
+                    f"{change:.1f} and the jaws {'kept hold' if holding else 'came up empty'}"
+                )
+                if change >= MOVED_THRESHOLD:
+                    arm.raise_by(-LIFT_CHECK_M)
+                    arm.grip(1.0)
+                    arm.wrist_to(WRIST_START_RAD, speed=0.5)
+                    continue
+                if holding:
+                    print(f"cap is off after {stroke} stroke(s); the gripper is holding it")
+                    return
+            # Nothing in the jaws: look before gripping whatever is there now.
             arm.grip(1.0)
-            arm.wrist_to(WRIST_START_RAD, speed=0.5)
+            arm.to_joints(np.asarray(VIEW_JOINTS), speed=0.4)
+            if not cap_on_bottle(app, args.x, args.y, args.top, args.prompt):
+                print(f"cap is off after {stroke} stroke(s); it is not in the gripper")
+                return
+            onto_cap()
         raise SystemExit(f"cap still on after {MAX_STROKES} strokes")
     finally:
         app.stop()
