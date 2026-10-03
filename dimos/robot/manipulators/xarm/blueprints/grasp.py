@@ -77,6 +77,9 @@ XARM_GRASP_SCAN_JOINTS = [0.0, -0.04609, 0.0, 1.83940, 0.0, 1.87106, 0.0]
 # was mapped.
 XARM_GRASP_VOXEL_SIZE = 0.025
 
+# Hardware home preset for go_home: the arm's joint state recorded on
+# 2026-10-02 parked over the workspace with the wrist camera looking down.
+XARM_GRASP_HOME_JOINTS = [-1.5289, -0.4625, -0.1134, 0.8465, -0.0681, 1.3090, 0.0]
 # World-frame tool height measured with the gripper pointing down and the
 # fingertips resting on the table (2026-10-02). move_near never plans below it.
 XARM_GRASP_NEAR_MIN_Z = -0.012
@@ -147,6 +150,7 @@ else:
         # The self filter needs a capture-time transform for every collision link
         # and drops the whole cloud when one is missing.
         tf_extra_links=XARM7_COLLISION_LINKS,
+        home_joints=XARM_GRASP_HOME_JOINTS,
     )
     _hardware = xarm7_hardware("arm", gripper=True)
 
