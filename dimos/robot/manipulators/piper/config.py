@@ -54,6 +54,13 @@ PIPER_GRIPPER_COLLISION_EXCLUSIONS: list[tuple[str, str]] = [
     ("gripper_link1", "gripper_link2"),
     ("link6", "gripper_base"),
 ]
+
+# The fingers run along gripper_base's +Z; their meshes span 6.2-13.8 cm of it.
+PIPER_FINGERTIP_DEPTH = 0.138
+# The tool frame: between the jaws, 2 cm in from the fingertips.
+PIPER_TCP_FRAME = "gripper_tcp"
+PIPER_TCP_DEPTH = 0.118
+
 PIPER_DESCRIPTION_REPO = "https://github.com/agilexrobotics/agx_arm_urdf"
 PIPER_DESCRIPTION_REF = "f6642ce0d7872c686f29c99e9e10cd23d1d49313"
 
@@ -182,14 +189,26 @@ def piper_joint_offsets_from_env() -> list[float] | None:
 def make_piper_model_config(
     *,
     home_joints: list[float] | None = None,
+    tcp: bool = False,
 ) -> RobotModelConfig:
+    """The Piper planning model.
+
+    With ``tcp`` the planning tip is the tool frame between the jaws rather
+    than gripper_base, so a pose target names where the grasp happens, as it
+    does on an arm whose description ships a TCP link.
+    """
     dof = 6
     model_joint_names = joint_names(dof)
     model_home_joints = list(home_joints) if home_joints is not None else list(PIPER_HOME_JOINTS)
+    model = RobotModel.from_file(
+        PIPER_MODEL_PATH, package_paths=PIPER_PACKAGE_PATHS
+    ).with_default_joint_acceleration_limit(2.0)
+    if tcp:
+        model = model.with_fixed_frame(
+            PIPER_TCP_FRAME, "gripper_base", xyz=(0.0, 0.0, PIPER_TCP_DEPTH)
+        )
     return RobotModelConfig(
-        model=RobotModel.from_file(
-            PIPER_MODEL_PATH, package_paths=PIPER_PACKAGE_PATHS
-        ).with_default_joint_acceleration_limit(2.0),
+        model=model,
         joint_names=model_joint_names,
         base_link="base_link",
         planning_groups=[
@@ -197,7 +216,7 @@ def make_piper_model_config(
                 name="manipulator",
                 joint_names=tuple(model_joint_names),
                 base_link="base_link",
-                tip_link="gripper_base",
+                tip_link=PIPER_TCP_FRAME if tcp else "gripper_base",
             )
         ],
         auto_convert_meshes=True,

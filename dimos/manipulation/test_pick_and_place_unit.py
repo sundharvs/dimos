@@ -250,6 +250,44 @@ def test_place_uses_local_axis_and_clears_held_state(module: PickAndPlaceModule)
     assert module._selected_grasp is None
 
 
+def test_place_without_a_height_returns_to_the_pick_height(module: PickAndPlaceModule) -> None:
+    manipulation: Any = module._manipulation
+    assert module.pick_object("cup-1").is_success()
+    manipulation.plan_to_poses.reset_mock()
+
+    result = module.place_at(0.4, 0.1)
+
+    assert result.is_success()
+    # The fixture's grasp sits at z=0.2; the pre-place pose is one offset above it.
+    preplace = manipulation.plan_to_poses.call_args_list[0].args[0]["arm/tool"]
+    assert (preplace.position.x, preplace.position.y) == pytest.approx((0.4, 0.1))
+    assert preplace.position.z == pytest.approx(0.2 + module.config.pregrasp_offset)
+
+
+def test_place_refuses_a_height_below_the_floor(module: PickAndPlaceModule) -> None:
+    manipulation: Any = module._manipulation
+    module.config.min_place_z = 0.05
+    module._selected_grasp = PoseStamped(frame_id="world", position=Vector3(0.1, 0.0, 0.2))
+    module._holding_object = True
+
+    result = module.place_at(0.4, 0.0, 0.049)
+
+    assert result.error_code == "INVALID_INPUT"
+    manipulation.plan_to_poses.assert_not_called()
+    assert module._holding_object
+
+
+def test_place_at_the_pick_height_is_not_held_to_the_floor(module: PickAndPlaceModule) -> None:
+    """The object left its support at that height, so it is reachable by construction."""
+    module.config.min_place_z = 0.5
+    module._selected_grasp = PoseStamped(frame_id="world", position=Vector3(0.1, 0.0, 0.2))
+    module._holding_object = True
+
+    result = module.place_at(0.4, 0.0)
+
+    assert result.is_success()
+
+
 def test_scan_failure_clears_stale_selection(module: PickAndPlaceModule) -> None:
     scene: Any = module._scene
     module._selected_grasp = PoseStamped(frame_id="world")

@@ -62,6 +62,12 @@ class ObjectSceneRegistrationConfig(ModuleConfig):
     detect_on_request: bool = False
     distance_threshold: float = 0.2
     min_detections_for_permanent: int = 6
+    # Whether an object's cloud keeps the points of its earlier sightings. That
+    # fills in a static scene, but a re-sighting is matched to a stored object by
+    # distance alone, so an object that has been moved, or turned over in place,
+    # keeps points from where it used to be. Turn it off when the cloud is
+    # grasped from and objects are being rearranged.
+    accumulate_pointclouds: bool = True
     max_distance: float = 0.0
     use_aabb: bool = False
     max_obstacle_width: float = 0.0
@@ -108,6 +114,7 @@ class ObjectSceneRegistrationModule(Module):
         self._object_db = ObjectDB(
             distance_threshold=self.config.distance_threshold,
             min_detections_for_permanent=self.config.min_detections_for_permanent,
+            accumulate_pointclouds=self.config.accumulate_pointclouds,
         )
         self._processing_lock = threading.RLock()
         self._text_prompts = []
@@ -138,6 +145,10 @@ class ObjectSceneRegistrationModule(Module):
     @rpc
     def start(self) -> None:
         super().start()
+        # The buffer subscribes on first touch. Left to a detect-on-request scan,
+        # that touch comes after the frame it must resolve, and the scan finds
+        # no transform for it.
+        _ = self.tfbuffer
 
         if self._detector_class is not None:
             self._detector = self._detector_class()

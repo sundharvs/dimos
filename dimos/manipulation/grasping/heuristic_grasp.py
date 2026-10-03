@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -33,14 +34,15 @@ from dimos.msgs.manipulation_msgs.GraspCandidateArray import GraspCandidateArray
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.std_msgs.Header import Header
 
+# Share of points ignored at each end of a footprint axis when measuring its
+# extent, so a few stray points do not move an edge.
+_EXTENT_TRIM = 0.02
+
 
 class HeuristicGraspModuleConfig(ModuleConfig):
-    # How far the planning tip sits behind the point between the jaws that should
-    # meet the object's centre, along the approach. Zero when the tip is already
-    # there, as for a TCP frame between the fingertips.
-    tip_offset: float = Field(default=0.0, ge=0.0)
-    # Planning tip to fingertips along the approach. When set, a short object is
-    # grasped higher so the fingertips stop above its lowest point (the table).
+    # How far the fingertips reach past the planning tip along the approach. When
+    # set, a short object is grasped higher so the fingertips stop above its
+    # lowest point (the table).
     fingertip_depth: float | None = Field(default=None, gt=0.0)
     fingertip_clearance: float = Field(default=0.01, ge=0.0)
     # Height of the surface objects rest on. A camera looking down sees little
@@ -50,6 +52,12 @@ class HeuristicGraspModuleConfig(ModuleConfig):
     # Added to the jaw yaw. A parallel-jaw grasp is unchanged by a half turn, so
     # pi picks the equivalent grasp for a wrist whose range is centred there.
     yaw_offset: float = 0.0
+    # What the jaws centre on: where the points are densest, or the middle of
+    # the footprint measured along its own axes. The two agree for a cloud seen
+    # from straight above. A camera off to one side also sees the near side wall,
+    # a dense line of points that pulls the median toward that edge by more than
+    # a narrow gripper's clearance.
+    centering: Literal["median", "extent"] = "median"
 
 
 class HeuristicGraspModule(Module, GraspGenSpec):
@@ -73,20 +81,21 @@ class HeuristicGraspModule(Module, GraspGenSpec):
             raise ValueError("object pointcloud XYZ values must be finite floats in metres")
 
         xy = points[:, :2]
-        center_xy = np.median(xy, axis=0)
+        if self.config.centering == "extent":
+            center_xy = self._extent_center(xy)
+        else:
+            center_xy = np.median(xy, axis=0)
         low_z, high_z = np.quantile(points[:, 2], [0.05, 0.95])
         if self.config.support_z is not None:
             low_z = min(self.config.support_z, high_z)
         grasp_z = float((low_z + high_z) / 2.0)
-        tip_offset = self.config.tip_offset
         if self.config.fingertip_depth is not None:
-            fingertips_past_grasp = self.config.fingertip_depth - tip_offset
             grasp_z = max(
-                grasp_z, float(low_z) + self.config.fingertip_clearance + fingertips_past_grasp
+                grasp_z,
+                float(low_z) + self.config.fingertip_clearance + self.config.fingertip_depth,
             )
-        # The approach is straight down, so the tip sits directly above the grasp.
         pose = Pose(
-            Vector3(float(center_xy[0]), float(center_xy[1]), grasp_z + tip_offset),
+            Vector3(float(center_xy[0]), float(center_xy[1]), grasp_z),
             Quaternion.from_euler(
                 Vector3(-math.pi, 0.0, self._narrow_axis_yaw(xy) + self.config.yaw_offset)
             ),
@@ -95,6 +104,16 @@ class HeuristicGraspModule(Module, GraspGenSpec):
             Header(float(object_pointcloud.ts), object_pointcloud.frame_id),
             [GraspCandidate(pose, score=1.0)],
         )
+
+    @staticmethod
+    def _extent_center(xy: NDArray[np.float32]) -> NDArray[np.float64]:
+        mean = np.mean(xy, axis=0, dtype=np.float64)
+        centered = xy - mean
+        _, axes = np.linalg.eigh(centered.T @ centered)
+        along_axes = centered @ axes
+        low, high = np.quantile(along_axes, [_EXTENT_TRIM, 1.0 - _EXTENT_TRIM], axis=0)
+        center: NDArray[np.float64] = mean + axes @ ((low + high) / 2.0)
+        return center
 
     @staticmethod
     def _narrow_axis_yaw(xy: NDArray[np.float32]) -> float:

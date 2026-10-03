@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 import math
+from typing import Any
 
 import numpy as np
 import pytest
@@ -36,6 +37,20 @@ def module() -> Iterator[HeuristicGraspModule]:
     instance = HeuristicGraspModule()
     yield instance
     instance.stop()
+
+
+@pytest.fixture
+def make_module() -> Iterator[Callable[..., HeuristicGraspModule]]:
+    instances: list[HeuristicGraspModule] = []
+
+    def make(**config: Any) -> HeuristicGraspModule:
+        instance = HeuristicGraspModule(**config)
+        instances.append(instance)
+        return instance
+
+    yield make
+    for instance in instances:
+        instance.stop()
 
 
 def test_heuristic_grasp_implements_grasp_provider_spec(module: HeuristicGraspModule) -> None:
@@ -130,36 +145,64 @@ def test_heuristic_grasp_rejects_invalid_pointclouds(
         module.propose_grasps(_cloud(points, frame_id=frame_id, timestamp=timestamp))
 
 
-def test_heuristic_grasp_raises_tip_by_offset() -> None:
-    module = HeuristicGraspModule(tip_offset=0.12)
-    try:
-        proposals = module.propose_grasps(
-            _cloud(
-                np.asarray(
-                    [
-                        [-0.02, -0.02, 0.10],
-                        [0.02, 0.02, 0.10],
-                        [-0.02, 0.02, 0.20],
-                        [0.02, -0.02, 0.20],
-                    ]
-                )
-            )
-        )
-    finally:
-        module.stop()
+def test_heuristic_grasp_keeps_fingertips_above_short_object_base(
+    make_module: Callable[..., HeuristicGraspModule],
+) -> None:
+    module = make_module(fingertip_depth=0.02, fingertip_clearance=0.01)
+    flat = np.asarray([[-0.02, -0.02, 0.0], [0.02, 0.02, 0.0], [0.0, 0.0, 0.02]])
 
-    pose = proposals.candidates[0].pose
-    assert pose.position.z == pytest.approx(0.15 + 0.12)
+    pose = module.propose_grasps(_cloud(flat)).candidates[0].pose
 
-
-def test_heuristic_grasp_keeps_fingertips_above_short_object_base() -> None:
-    module = HeuristicGraspModule(tip_offset=0.118, fingertip_depth=0.138, fingertip_clearance=0.01)
-    try:
-        flat = np.asarray([[-0.02, -0.02, 0.0], [0.02, 0.02, 0.0], [0.0, 0.0, 0.02]])
-        proposals = module.propose_grasps(_cloud(flat))
-    finally:
-        module.stop()
-
-    pose = proposals.candidates[0].pose
-    fingertips_z = pose.position.z - 0.138
+    fingertips_z = pose.position.z - 0.02
     assert fingertips_z == pytest.approx(0.01, abs=1e-3)
+
+
+def test_heuristic_grasp_measures_a_top_only_cloud_down_to_its_support(
+    make_module: Callable[..., HeuristicGraspModule],
+) -> None:
+    """A camera overhead sees an object's top face and nothing of its sides."""
+    module = make_module(support_z=0.0)
+    top_face = np.asarray(
+        [[-0.02, -0.01, 0.10], [0.02, -0.01, 0.10], [0.02, 0.01, 0.10], [-0.02, 0.01, 0.10]]
+    )
+
+    pose = module.propose_grasps(_cloud(top_face)).candidates[0].pose
+
+    assert pose.position.z == pytest.approx(0.05)
+
+
+def test_heuristic_grasp_yaw_offset_turns_the_jaws_half_way_round(
+    make_module: Callable[..., HeuristicGraspModule],
+) -> None:
+    long_along_y = _cloud(
+        np.asarray(
+            [[-0.02, -0.10, 0.10], [0.02, -0.10, 0.10], [-0.02, 0.10, 0.10], [0.02, 0.10, 0.10]]
+        )
+    )
+
+    plain = make_module().propose_grasps(long_along_y).candidates[0].pose
+    turned = make_module(yaw_offset=math.pi).propose_grasps(long_along_y).candidates[0].pose
+
+    plain_jaw = plain.orientation.rotate_vector(Vector3(0.0, 1.0, 0.0))
+    turned_jaw = turned.orientation.rotate_vector(Vector3(0.0, 1.0, 0.0))
+    assert turned_jaw.x == pytest.approx(-plain_jaw.x)
+    assert abs(turned_jaw.x) == pytest.approx(1.0)
+
+
+def test_heuristic_grasp_extent_centering_ignores_point_density(
+    make_module: Callable[..., HeuristicGraspModule],
+) -> None:
+    """A side wall seen at an angle piles points onto one edge of the footprint."""
+    xs, ys = np.meshgrid(np.linspace(-0.05, 0.05, 11), np.linspace(-0.02, 0.02, 5))
+    top_face = np.column_stack([xs.ravel(), ys.ravel(), np.full(xs.size, 0.03)])
+    side_wall = np.column_stack(
+        [np.linspace(-0.05, 0.05, 200), np.full(200, -0.02), np.linspace(0.0, 0.03, 200)]
+    )
+    cloud = _cloud(np.vstack([top_face, side_wall]))
+
+    by_median = make_module().propose_grasps(cloud).candidates[0].pose
+    by_extent = make_module(centering="extent").propose_grasps(cloud).candidates[0].pose
+
+    assert by_median.position.y == pytest.approx(-0.02)
+    assert by_extent.position.x == pytest.approx(0.0, abs=1e-6)
+    assert by_extent.position.y == pytest.approx(0.0, abs=1e-6)

@@ -50,6 +50,10 @@ class PickAndPlaceModuleConfig(ModuleConfig):
     # always kinematically reachable; a single-candidate provider is unaffected.
     max_grasp_attempts: int = Field(default=5, gt=0)
     yaw_policy: Literal["generated", "preserve_current"] = "generated"
+    # Lowest planning-frame height place_at accepts as an explicit z. The last
+    # leg of a place is not collision checked, so a z under the support surface
+    # would press the fingers and the held object into it.
+    min_place_z: float | None = None
     grasp_verification: GraspVerificationConfig = Field(default_factory=GraspVerificationConfig)
 
 
@@ -196,19 +200,30 @@ class PickAndPlaceModule(Module):
         self,
         x: float,
         y: float,
-        z: float,
+        z: float | None = None,
         planning_group: PlanningGroupID | None = None,
     ) -> SkillResult[ManipulationSkillError]:
-        """Place the held object at an explicit planning-frame position.
+        """Place the held object at a planning-frame position.
 
         Args:
             x: Planning-frame X coordinate in meters.
             y: Planning-frame Y coordinate in meters.
-            z: Planning-frame Z coordinate in meters.
+            z: Planning-frame Z coordinate in meters. Omit to set the object down
+                at the height it was picked from.
             planning_group: Gripper-capable pose group; omitted only when unambiguous.
         """
         if self._selected_grasp is None or not self._holding_object:
             return SkillResult.fail("INVALID_STATE", "Pick an object before placing")
+        if z is None:
+            # The object left its support with the tip at the grasp height, so
+            # the same height sets it back down on a surface at that level.
+            z = self._selected_grasp.position.z
+        elif self.config.min_place_z is not None and z < self.config.min_place_z:
+            return SkillResult.fail(
+                "INVALID_INPUT",
+                f"z={z:.3f} is below the lowest place height {self.config.min_place_z:.3f}; "
+                "omit z to place at the height the object was picked from",
+            )
         group = self._resolve_group(planning_group)
         if group is None:
             return SkillResult.fail(
