@@ -49,6 +49,7 @@ from dimos.robot.manipulators.common.blueprints import (
     eef_twist_task,
     trajectory_task,
 )
+from dimos.robot.manipulators.common.coordinators import ArmTwistCoordinator
 from dimos.robot.manipulators.xarm.config import (
     XARM7_COLLISION_LINKS,
     make_xarm7_model_config,
@@ -283,7 +284,11 @@ XARM_GRASP_TELEOP_PRIORITY = 5
 
 xarm_grasp_keyboard = autoconnect(
     *_XARM_GRASP_STACK,
+    # The eef_twist card binds the ee_twist_command input, which only this
+    # subclass declares. Keep the instance name so RPC clients still find it.
     coordinator(
+        cls=ArmTwistCoordinator,
+        instance_name="ControlCoordinator",
         hardware=[_hardware],
         tasks=[
             *_XARM_GRASP_TASKS,
