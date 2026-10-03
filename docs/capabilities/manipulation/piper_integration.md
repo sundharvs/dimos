@@ -150,9 +150,10 @@ feedback frame carries a driver status byte:
 candump can0,260:7F8      # 0x261-0x266, sixth data byte: 40 is enabled and healthy
 ```
 
-Anything else is a fault; `32`, for one, is motor overheat, collision and
-driver error with the enable bit clear. Stop the blueprint, clear the joint's
-error and start again:
+Anything else on a joint while the others read `40` is a fault; `32`, for
+one, is motor overheat, collision and driver error with the enable bit clear.
+(All six reading `30` before any blueprint has connected is only the state
+after power-up.) Stop the blueprint, clear the joint's error and start again:
 
 ```bash
 python .agents/skills/piper-hardware/scripts/piper_joints.py            # decoded status
@@ -185,8 +186,10 @@ What is particular to this arm:
   the band narrows with height. The blueprint stops 6 cm above a grasp or a
   place for that reason; `piper_reach.py` in the same skill folder prints the
   band for any height.
-- An object has to be in the wrist camera's view from the scan pose. One cut
-  off by the edge of the frame is still detected, and is grasped off centre.
+- An object has to be in the wrist camera's view. One cut off by the edge of
+  the frame is still detected, and is grasped up to 1 cm off centre. For an
+  object off to one side, turn the scan pose to face it first: `move_to_joints`
+  with joint 1 at the object's azimuth and the other joints as in `go_home`.
 - The camera mount, the table height and the joint offsets are measured values
   in `dimos/robot/manipulators/piper/blueprints/grasp.py` and
   `PIPER_JOINT_OFFSETS_DEG`. Re-measure them when the rig moves.
