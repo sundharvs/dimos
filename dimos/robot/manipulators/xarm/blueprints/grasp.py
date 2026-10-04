@@ -31,6 +31,7 @@ coordinator, pick-and-place, scene registration -- is the same stack either way.
 from __future__ import annotations
 
 from datetime import datetime
+import os
 
 from dimos.constants import RECORDINGS_DIR
 from dimos.control.coordinator import TaskConfig
@@ -40,6 +41,7 @@ from dimos.core.stream import In
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
 from dimos.imitation.collection.episode_monitor import EpisodeMonitorModule
 from dimos.imitation.collection.recorder import CollectionRecorder
+from dimos.imitation.policy.lerobot.module import LeRobotPolicyModule
 from dimos.manipulation.grasping.grasp_gen_x.module import GraspGenXModule
 from dimos.manipulation.grasping.heuristic_grasp import HeuristicGraspModule
 from dimos.manipulation.manipulation_module import ManipulationModule
@@ -413,5 +415,41 @@ xarm_grasp_keyboard_collect = autoconnect(
         record_tf=False,
         # Depth must stay lossless; the default image codec is JPEG.
         stream_codecs={"depth_image": "lz4+lcm"},
+    ),
+).remappings(_REMAPPINGS)
+
+
+# --- Policy rollout ----------------------------------------------------------
+#
+# ``xarm-grasp-keyboard-policy`` runs an ACT checkpoint trained on the
+# ``xarm-grasp-keyboard-collect`` recordings (``dataprep_xarm_grasp.json``:
+# state = 7 arm joints + native gripper, action = next joint state + normalized
+# gripper command). Point ``XARM_GRASP_POLICY`` at the checkpoint's
+# ``pretrained_model`` directory, then from ``dimos shell``:
+#
+#   app.LeRobotPolicyModule.preflight_rollout()   # loads, validates live inputs
+#   app.LeRobotPolicyModule.start_rollout()
+#   app.LeRobotPolicyModule.stop_rollout()
+#
+# The keyboard keeps working for homing and the gripper in between rollouts.
+XARM_GRASP_POLICY_PATH = os.environ.get(
+    "XARM_GRASP_POLICY", "outputs/act_xarm7_grasp/checkpoints/last/pretrained_model"
+)
+XARM_GRASP_POLICY_JOINTS = [f"joint{i}" for i in range(1, 8)] + ["arm/gripper"]
+
+xarm_grasp_keyboard_policy = autoconnect(
+    *_XARM_GRASP_KEYBOARD_MODULES,
+    HeuristicGraspModule.blueprint(),
+    LeRobotPolicyModule.blueprint(
+        policy_path=XARM_GRASP_POLICY_PATH,
+        task="xarm7 grasp",
+        joint_names=XARM_GRASP_POLICY_JOINTS,
+        # Dataset rate: the policy's n_action_steps are executed at this rate.
+        fps=15.0,
+        robot_type="xarm7",
+        image_width=848,
+        image_height=480,
+        image_feature="observation.images.image",
+        gripper_joint="arm/gripper",
     ),
 ).remappings(_REMAPPINGS)

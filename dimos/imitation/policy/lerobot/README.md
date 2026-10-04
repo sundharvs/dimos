@@ -47,11 +47,18 @@ chunk, clips every action dimension to the checkpoint's recorded data range,
 and executes its first `n_action_steps` at the configured `fps`. Trajectory execution uses the coordinator's existing start-position and velocity handling. Configure `fps` to
 match the action frequency used by the training dataset.
 
-Current limitation: this contract assumes every postprocessed action is an
-absolute target in the connected hardware joint's native coordinate. A generic
-contract for checkpoints that encode grippers in normalized or device-specific
-coordinates remains future work; this runtime does not special-case those
-grippers.
+`image_feature` names the checkpoint's single camera input (default
+`observation.images.wrist`; a dataset built from a `color_image` stream by
+`dimos dataprep` has `observation.images.image`).
+
+Every postprocessed action is sent as an absolute target in the hardware
+joint's native coordinate, with one exception: set `gripper_joint` to a joint
+in `joint_names` whose *action* is a normalized opening (0 closed .. 1 open)
+while its *state* stays native, the convention of the DimOS collection
+recorders. That joint is left out of the trajectory and each chunk's first
+opening is published on `gripper_command` for the coordinator's gripper task.
+`xarm-grasp-keyboard-policy` (`dimos/robot/manipulators/xarm/blueprints/grasp.py`)
+is the reference setup.
 
 Run isolated runtime checks with:
 

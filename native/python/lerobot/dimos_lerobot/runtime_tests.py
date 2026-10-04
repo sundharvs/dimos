@@ -129,6 +129,7 @@ class RuntimeFactory(Protocol):
         policy: FakePolicy,
         *,
         device: str | None = None,
+        **config: Any,
     ) -> tuple[LeRobotPolicyRuntime, Any]: ...
 
 
@@ -145,6 +146,7 @@ def make_runtime(mocker: pytest_mock.MockerFixture) -> Iterator[RuntimeFactory]:
         policy: FakePolicy,
         *,
         device: str | None = None,
+        **config: Any,
     ) -> tuple[LeRobotPolicyRuntime, Any]:
         def load_config(_path: str) -> FakeUpstreamConfig:
             policy.config_load_count += 1
@@ -193,6 +195,7 @@ def make_runtime(mocker: pytest_mock.MockerFixture) -> Iterator[RuntimeFactory]:
             robot_type="test_arm",
             image_width=5,
             image_height=4,
+            **config,
         )
         control = mocker.MagicMock()
         control.execute_trajectory.return_value = TrajectoryExecutionResult(
@@ -267,6 +270,39 @@ def test_policy_predicts_and_executes_one_native_joint_chunk(make_runtime: Runti
     np.testing.assert_array_equal(image.squeeze(0).numpy(), rgb)
     assert policy.postprocessor.calls
     assert module.rollout_status()["chunks_accepted"] >= 1
+
+
+def test_gripper_joint_goes_to_the_gripper_stream_not_the_trajectory(
+    make_runtime: RuntimeFactory, mocker: pytest_mock.MockerFixture
+) -> None:
+    actions = _action_chunk()
+    actions[:, -1] = [1.5, 0.0, 0.25]  # normalized opening; the first step is clipped to 1.0
+    policy = FakePolicy(actions, n_action_steps=2)
+    policy.upstream_config.input_features["observation.images.image"] = (
+        policy.upstream_config.input_features.pop("observation.images.wrist")
+    )
+    module, control = make_runtime(
+        policy, image_feature="observation.images.image", gripper_joint=JOINTS[-1]
+    )
+    gripper = mocker.MagicMock()
+    mocker.patch.object(module, "gripper_command", gripper, create=True)
+    _rgb, positions, _ts = _provide_observation(module)
+
+    _preflight(module)
+    assert module.start_rollout()["active"] is True
+    wait_until(lambda: control.execute_trajectory.call_count >= 1, timeout=1.0)
+    module.stop_rollout()
+
+    trajectory = control.execute_trajectory.call_args_list[0].args[0]
+    assert trajectory.joint_names == JOINTS[:-1]
+    np.testing.assert_allclose(trajectory.points[0].positions, positions[:-1])
+    np.testing.assert_allclose(trajectory.points[1].positions, actions[0, :-1])
+    np.testing.assert_allclose(trajectory.points[2].positions, actions[1, :-1])
+    assert gripper.publish.call_count >= 1
+    assert gripper.publish.call_args_list[0].args[0].data == pytest.approx(1.0)
+    assert policy.batch is not None
+    assert "observation.images.image" in policy.batch
+    assert "observation.images.wrist" not in policy.batch
 
 
 def test_policy_actions_are_clipped_to_checkpoint_range(make_runtime: RuntimeFactory) -> None:

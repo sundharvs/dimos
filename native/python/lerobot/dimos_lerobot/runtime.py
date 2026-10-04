@@ -46,6 +46,7 @@ from dimos.imitation.policy.lerobot.module import (
 )
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.JointState import JointState
+from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.msgs.trajectory_msgs.JointTrajectory import JointTrajectory
 from dimos.msgs.trajectory_msgs.TrajectoryPoint import TrajectoryPoint
 from dimos.teleop.webxr.controller_types import BUTTON_ALIASES, Buttons
@@ -53,7 +54,6 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-_IMAGE_FEATURE = "observation.images.wrist"
 _STATE_FEATURE = "observation.state"
 _ACTION_FEATURE = "action"
 
@@ -323,7 +323,8 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
     def _validate_features(self, policy_config: PreTrainedConfig) -> None:
         inputs = policy_config.input_features or {}
         outputs = policy_config.output_features or {}
-        missing = {_IMAGE_FEATURE, _STATE_FEATURE} - set(inputs)
+        image_feature = self.config.image_feature
+        missing = {image_feature, _STATE_FEATURE} - set(inputs)
         if missing:
             raise ValueError(
                 "Policy is incompatible with the DimOS single-camera runtime; "
@@ -335,7 +336,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             raise ValueError("Policies using temporal ensembling are not supported")
 
         state_shape = tuple(inputs[_STATE_FEATURE].shape)
-        image_shape = tuple(inputs[_IMAGE_FEATURE].shape)
+        image_shape = tuple(inputs[image_feature].shape)
         action_shape = tuple(outputs[_ACTION_FEATURE].shape)
         joint_count = len(self.config.joint_names)
         expected_image_shape = (3, self.config.image_height, self.config.image_width)
@@ -361,7 +362,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
         task: str,
     ) -> NDArray[np.float32]:
         observation: RawObservation = {
-            _IMAGE_FEATURE: image,
+            self.config.image_feature: image,
             _STATE_FEATURE: state,
         }
         with (
@@ -436,6 +437,15 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
                 actions = bounded_actions
                 if self._stop_event.is_set():
                     break
+                gripper_index = self._gripper_index()
+                if gripper_index is not None:
+                    # The gripper task owns that joint: hand it the chunk's first
+                    # normalized opening and keep it out of the arm trajectory.
+                    opening = float(np.clip(actions[0, gripper_index], 0.0, 1.0))
+                    self.gripper_command.publish(Float32(data=opening))
+                    arm = [i for i in range(expected_width) if i != gripper_index]
+                    state = state[arm]
+                    actions = actions[:, arm]
                 result = self._control.execute_trajectory(self._trajectory(state, actions))
                 if result.status is TrajectoryExecutionStatus.START_STATE_MISMATCH:
                     self._wait_for_newer_joint_state(state_ts)
@@ -490,12 +500,21 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
                 else timeout_error
             )
 
+    def _gripper_index(self) -> int | None:
+        if self.config.gripper_joint is None:
+            return None
+        return self.config.joint_names.index(self.config.gripper_joint)
+
+    def _arm_joint_names(self) -> list[str]:
+        return [name for name in self.config.joint_names if name != self.config.gripper_joint]
+
     def _trajectory(
         self,
         state: NDArray[np.float32],
         actions: NDArray[np.float32],
     ) -> JointTrajectory:
-        zeros = [0.0] * len(self.config.joint_names)
+        joint_names = self._arm_joint_names()
+        zeros = [0.0] * len(joint_names)
         points = [
             TrajectoryPoint(
                 positions=[float(value) for value in state],
@@ -511,7 +530,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             )
             for index, action in enumerate(actions)
         )
-        return JointTrajectory(joint_names=list(self.config.joint_names), points=points)
+        return JointTrajectory(joint_names=joint_names, points=points)
 
     def _wait_for_newer_joint_state(self, previous_ts: float) -> None:
         with self._observation_changed:

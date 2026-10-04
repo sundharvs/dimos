@@ -19,20 +19,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, TypedDict
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 
 from dimos.control.tasks.trajectory_task.trajectory_task import (
     TrajectoryCancellationResult,
     TrajectoryExecutionResult,
 )
 from dimos.core.core import rpc
-from dimos.core.stream import In
+from dimos.core.stream import In, Out
 from dimos.experimental.isolated_python.module import (
     IsolatedPythonModule,
     IsolatedPythonModuleConfig,
 )
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.JointState import JointState
+from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.msgs.trajectory_msgs.JointTrajectory import JointTrajectory
 from dimos.spec.utils import Spec
 from dimos.teleop.webxr.controller_types import BUTTON_ALIASES, Buttons
@@ -86,6 +87,12 @@ class LeRobotPolicyModuleConfig(IsolatedPythonModuleConfig):
     image_height: int = Field(default=480, gt=0)
     max_observation_age_s: float = Field(default=0.5, gt=0)
     rollout_button: str = "A"
+    # Name of the checkpoint's single camera feature (LeRobot dataset key).
+    image_feature: str = Field(default="observation.images.wrist", min_length=1)
+    # A joint in ``joint_names`` whose action is a normalized opening (0 closed ..
+    # 1 open) rather than a native target: it is kept out of the trajectory and
+    # published on ``gripper_command`` for the coordinator's gripper task.
+    gripper_joint: str | None = None
 
     @field_validator("policy_path")
     @classmethod
@@ -101,6 +108,16 @@ class LeRobotPolicyModuleConfig(IsolatedPythonModuleConfig):
         if len(set(joint_names)) != len(joint_names):
             raise ValueError("joint_names must not contain duplicates")
         return joint_names
+
+    @field_validator("gripper_joint")
+    @classmethod
+    def gripper_joint_must_be_configured(
+        cls, gripper_joint: str | None, info: ValidationInfo
+    ) -> str | None:
+        joint_names = info.data.get("joint_names") or []
+        if gripper_joint is not None and gripper_joint not in joint_names:
+            raise ValueError(f"gripper_joint {gripper_joint!r} is not in joint_names")
+        return gripper_joint
 
     @field_validator("rollout_button")
     @classmethod
@@ -121,6 +138,7 @@ class LeRobotPolicyModule(IsolatedPythonModule):
     coordinator_joint_state: In[JointState]
     button_pressed: In[Buttons]
     teleop_buttons: In[Buttons]
+    gripper_command: Out[Float32]
 
     _control: PolicyControlSpec
 
