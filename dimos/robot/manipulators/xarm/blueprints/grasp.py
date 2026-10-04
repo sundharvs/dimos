@@ -72,6 +72,7 @@ from dimos.robot.manipulators.xarm.config import (
     xarm7_hardware,
 )
 from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
+from dimos.teleop.keyboard.keyboard_home_module import KeyboardHomeModule
 from dimos.teleop.keyboard.keyboard_teleop_module import KeyboardTeleopModule
 from dimos.utils.data import LfsPath
 from dimos.visualization.rerun.bridge import RerunBridgeModule
@@ -328,10 +329,16 @@ _XARM_GRASP_KEYBOARD_COORDINATOR = coordinator(
     ],
 )
 
+# Z plans to XARM_GRASP_HOME_JOINTS through ManipulationSkills.go_home, which
+# also opens the gripper. The trajectory outranks the twist task, so the arm
+# is the keyboard's again as soon as it arrives.
+XARM_GRASP_KEYBOARD_HELP = [("Z", "Go home (opens the gripper)")]
+
 _XARM_GRASP_KEYBOARD_MODULES = (
     *_XARM_GRASP_STACK,
     _XARM_GRASP_KEYBOARD_COORDINATOR,
-    KeyboardTeleopModule.blueprint(),
+    KeyboardTeleopModule.blueprint(extra_controls=XARM_GRASP_KEYBOARD_HELP),
+    KeyboardHomeModule.blueprint(),
 )
 
 xarm_grasp_keyboard = autoconnect(
@@ -396,7 +403,10 @@ def _grasp_session_db() -> str:
 xarm_grasp_keyboard_collect = autoconnect(
     *_XARM_GRASP_STACK,
     _XARM_GRASP_KEYBOARD_COORDINATOR,
-    KeyboardTeleopModule.blueprint(extra_controls=XARM_GRASP_EPISODE_HELP),
+    KeyboardTeleopModule.blueprint(
+        extra_controls=[*XARM_GRASP_KEYBOARD_HELP, *XARM_GRASP_EPISODE_HELP]
+    ),
+    KeyboardHomeModule.blueprint(),
     HeuristicGraspModule.blueprint(),
     EpisodeMonitorModule.blueprint(
         keyboard_map=XARM_GRASP_EPISODE_KEYS,
