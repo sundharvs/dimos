@@ -18,6 +18,8 @@ import sys
 from types import ModuleType
 from typing import Any
 
+import pytest
+
 piper_sdk_module = ModuleType("piper_sdk")
 piper_sdk_module.__dict__["C_PiperInterface_V2"] = lambda **_: None
 sys.modules.setdefault("piper_sdk", piper_sdk_module)
@@ -40,3 +42,25 @@ def test_connect_continues_when_gripper_startup_fails(
     assert adapter.connect()
     assert adapter.is_connected()
     assert sdk.GripperCtrl.called
+
+
+def test_joint_offsets_shift_reads_and_writes(mocker: Any) -> None:
+    sdk = mocker.Mock()
+    sdk.GetArmJointMsgs.return_value.joint_state = mocker.Mock(
+        joint_1=0, joint_2=1000, joint_3=0, joint_4=0, joint_5=-5000, joint_6=0
+    )
+    offsets = [0.0, 0.0, 0.0, 0.0, 0.1, 0.0]
+    adapter = PiperAdapter(joint_offsets=offsets)
+    adapter._sdk = sdk
+
+    positions = adapter.read_joint_positions()
+    assert positions[1] == pytest.approx(1000 * piper_adapter.MILLIDEG_TO_RAD)
+    assert positions[4] == pytest.approx(-5000 * piper_adapter.MILLIDEG_TO_RAD + 0.1)
+
+    assert adapter.write_joint_positions(positions)
+    assert sdk.JointCtrl.call_args.args == (0, 1000, 0, 0, -5000, 0)
+
+
+def test_joint_offsets_need_six_values() -> None:
+    with pytest.raises(ValueError, match="6 values"):
+        PiperAdapter(joint_offsets=[0.1])

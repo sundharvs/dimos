@@ -56,8 +56,9 @@ Use before picking or after a failed grasp. Its result includes object IDs for t
 ## Pick & Place
 - **pick_object <object_id>**: Generate ranked grasp proposals and automatically execute the \
 top proposal. Use an exact object ID from the latest scan_objects result.
-- **place_at <x> <y> <z>**: Place the verified held object at explicit world-frame \
-coordinates.
+- **place_at <x> <y> [z]**: Place the verified held object at world-frame coordinates. \
+Leave z out to set it down at the height it was picked from; give z only for a surface \
+at a different height.
 
 ## Motion
 - **move_to_pose <x> <y> <z> [roll pitch yaw]**: Move end-effector to an absolute \

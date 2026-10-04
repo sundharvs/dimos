@@ -23,9 +23,14 @@ from unittest.mock import ANY, MagicMock, call
 import numpy as np
 import pytest
 
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.vision_msgs.Detection3DArray import Detection3DArray
 from dimos.perception.detection.type.detection2d.imageDetections2D import ImageDetections2D
+from dimos.perception.experimental.object import Object
 from dimos.perception.experimental.object_scene_registration import ObjectSceneRegistrationModule
 from dimos.perception.experimental.objectDB import ObjectDB
 
@@ -49,6 +54,24 @@ def _image(timestamp: float) -> Image:
         format=ImageFormat.DEPTH,
         frame_id="camera",
         ts=timestamp,
+    )
+
+
+def _sighting(points: list[list[float]], timestamp: float) -> Object:
+    cloud = np.asarray(points, dtype=np.float32)
+    return Object(
+        bbox=(0.0, 0.0, 1.0, 1.0),
+        track_id=-1,
+        class_id=0,
+        confidence=1.0,
+        name="cup",
+        ts=timestamp,
+        image=_image(timestamp),
+        center=Vector3(*cloud.mean(axis=0)),
+        size=Vector3(0.01, 0.01, 0.01),
+        pose=PoseStamped(frame_id="world"),
+        pointcloud=PointCloud2.from_numpy(cloud, frame_id="world", timestamp=timestamp),
+        camera_transform=Transform.identity(),
     )
 
 
@@ -468,11 +491,11 @@ def test_object_db_counts_each_source_frame_once(monkeypatch: Any) -> None:
     newer = MagicMock(object_id="newer-id", track_id=-1, ts=5.0)
     newer.center = MagicMock()
     newer.center.distance.return_value = 0.0
-    first.update_object.side_effect = lambda _: setattr(first, "detections_count", 2)
+    first.update_object.side_effect = lambda _, **__: setattr(first, "detections_count", 2)
     now[0] = 1001.0
 
     assert object_db.add_objects([newer]) == [first]
-    first.update_object.assert_called_once_with(newer)
+    first.update_object.assert_called_once_with(newer, accumulate_pointcloud=True)
     assert first.last_seen_ts == 1001.0
 
 
@@ -511,7 +534,7 @@ def test_object_db_keeps_first_sighting_pending_above_threshold() -> None:
     detected.center = None
     newer = MagicMock(object_id="newer-id", track_id=7, ts=2.0)
     newer.center = None
-    detected.update_object.side_effect = lambda _: setattr(detected, "detections_count", 2)
+    detected.update_object.side_effect = lambda _, **__: setattr(detected, "detections_count", 2)
 
     object_db.add_objects([detected])
 
@@ -521,3 +544,26 @@ def test_object_db_keeps_first_sighting_pending_above_threshold() -> None:
     object_db.add_objects([newer])
 
     assert object_db.get_objects() == [detected]
+
+
+def test_object_db_adds_a_resighting_to_the_stored_cloud_by_default() -> None:
+    object_db = ObjectDB(min_detections_for_permanent=1)
+    object_db.add_objects([_sighting([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0]], timestamp=1.0)])
+
+    [stored] = object_db.add_objects([_sighting([[0.02, 0.0, 0.0], [0.03, 0.0, 0.0]], 2.0)])
+
+    assert sorted(stored.pointcloud.points_f32()[:, 0].tolist()) == pytest.approx(
+        [0.0, 0.01, 0.02, 0.03]
+    )
+
+
+def test_object_db_keeps_only_the_latest_cloud_when_not_accumulating() -> None:
+    """An object nudged within the match distance must not keep its old outline."""
+    object_db = ObjectDB(min_detections_for_permanent=1, accumulate_pointclouds=False)
+    first = _sighting([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0]], timestamp=1.0)
+    object_db.add_objects([first])
+
+    [stored] = object_db.add_objects([_sighting([[0.02, 0.0, 0.0], [0.03, 0.0, 0.0]], 2.0)])
+
+    assert stored.object_id == first.object_id
+    assert sorted(stored.pointcloud.points_f32()[:, 0].tolist()) == pytest.approx([0.02, 0.03])

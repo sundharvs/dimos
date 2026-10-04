@@ -81,6 +81,29 @@ scanning from close up.
 The module never commands the arm. Each capture requires the arm to have been
 still and the board to reproject under 1 px. Rotation diversity is shown live;
 below 0.15 the solve is refused, and above 0.4 is well spread.
+3. Jog the arm in the Keyboard Teleop window until the board is in view, about
+   as far away as you will scan from, then press A in the Hand-eye calibration
+   window. The module drives the arm itself and solves at the end; X aborts the
+   current motion.
+
+   Or collect by hand: press SPACE to capture, U to undo and C to compute. Take
+   15 to 20 poses, turning the wrist about a different axis at each one while
+   keeping the board in view, and vary the distance. Translating the arm
+   constrains nothing.
+
+The automatic run first turns the wrist 8 degrees about link7's x and y axes and
+15 degrees about z, both ways, which needs no knowledge of the mount and is
+enough for a coarse solve. It then aims the camera at the board centre from 16
+views on a cone about the board's normal: one ring tilted 25 degrees, one 12.5,
+with the range varied 0.85 to 1.15 times the start range and up to 30 degrees of
+roll. It returns to the start pose and solves. Moves are planned against the
+robot model only, so stay at the arm: a view whose tool point would come within
+8 cm of the board's plane, that is unreachable, or whose plan winds a joint
+more than 90 degrees is skipped. The `--auto-*` flags tune all of this.
+
+Each capture requires the arm to have been still and the board to reproject
+under 1 px. Rotation diversity is shown live; below 0.15 the solve is refused,
+and above 0.4 is well spread.
 
 Computing runs all five OpenCV hand-eye solvers and keeps the one under which
 the board's recovered base-frame pose is most consistent across captures. That
@@ -88,11 +111,29 @@ spread, in mm and degrees, is the number to judge the calibration by. The
 solvers disagreeing by more than 5 mm means the data is thin. The result,
 the per-method table and every capture go to
 `~/.local/state/dimos/calibration/hand_eye.json`, and the report prints a
+`~/.local/state/dimos/calibration/xarm7_wrist_realsense.json`, and the report prints a
 `Transform(...)` to paste over `XARM_WRIST_CAMERA_TRANSFORM`. To re-solve the
 saved captures offline:
 
 ```bash
 python -m dimos.manipulation.calibration.hand_eye_module
+python -m dimos.manipulation.calibration.hand_eye_module \
+  ~/.local/state/dimos/calibration/xarm7_wrist_realsense_samples.json
+```
+
+### A fixed scene camera
+
+`xarm7-side-camera-calibration` runs the same tool eye-to-hand for the fixed
+side ZED 2i: mount the board rigidly on the gripper instead of the table, and
+the result is `world -> camera_link` for that camera. The ZED is read as a
+plain V4L2 webcam at 2K, so no ZED SDK is needed. Its raw left-camera
+intrinsics come from the factory file the ZED SDK downloads for that serial,
+copied to `~/.local/state/dimos/calibration/zed/SN33805648.conf`
+(`--intrinsics-file` points elsewhere). A missing file, or one without the
+frame's resolution, refuses captures rather than guessing intrinsics.
+
+```bash
+dimos run xarm7-side-camera-calibration --xarm7-ip 192.168.1.x --square-mm 34.0
 ```
 
 ## Voxel map obstacles
