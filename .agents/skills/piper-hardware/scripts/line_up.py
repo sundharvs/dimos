@@ -26,7 +26,14 @@ the object is compared too: when it has shifted, the camera is not where it was
 for the reference, so put the arm in the reference's pose before moving the
 object.
 
-Keys in the window: SPACE flips between the blend, the live view and the
+``--teleop`` starts ``keyboard-teleop-piper`` alongside when no stack is running,
+so the arm can be jogged into the reference's pose while the overlay updates:
+click the Keyboard Teleop window and use W/S, A/D, Q/E to translate, R/F, T/G,
+Y/H to rotate and [ ] for the gripper. That stack does not use the camera. It
+is left running on exit, because stopping a stack homes the arm and would lose
+the pose; stop it with stack.py when done.
+
+Keys in the line-up window: SPACE flips between the blend, the live view and the
 reference; S saves the overlay next to the reference; Q or ESC quits. ``--once``
 writes one overlay, prints the same numbers and exits 0 when lined up, 1 when
 not, for use without a display. The camera is opened directly, so no stack may
@@ -45,6 +52,9 @@ from typing import Any
 import cv2
 import numpy as np
 from numpy.typing import NDArray
+import stack
+
+from dimos.core.run_registry import get_most_recent
 
 Image = NDArray[Any]
 
@@ -64,6 +74,7 @@ MIN_OBJECT_AREA_FRACTION = 0.01
 FLIP_MARGIN = 0.03
 MIN_BACKGROUND_MATCHES = 12
 FRAMES_TO_DROP = 5
+TELEOP_BLUEPRINT = "keyboard-teleop-piper"
 REFERENCE_COLOUR = (255, 0, 255)
 LIVE_COLOUR = (0, 255, 0)
 
@@ -327,6 +338,20 @@ def read_frame(camera: cv2.VideoCapture, size: tuple[int, int]) -> Image:
     return np.asarray(frame, dtype=np.uint8)
 
 
+def start_teleop(can_port: str) -> None:
+    """Bring up the keyboard teleop stack unless a stack already has the arm."""
+    running = get_most_recent()
+    if running is not None:
+        print(f"{running.blueprint} is already running; jog the arm with it, not starting teleop")
+        return
+    if not stack.start(TELEOP_BLUEPRINT, can_port):
+        raise SystemExit(f"{TELEOP_BLUEPRINT} did not start")
+    print(
+        "teleop: click the Keyboard Teleop window; W/S A/D Q/E move, R/F T/G Y/H turn, [ ] gripper"
+    )
+    print("teleop: left running on exit; `stack.py stop` homes the arm")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("reference", type=Path, help="the image to line the scene up with")
@@ -338,7 +363,16 @@ def main() -> None:
         default=",".join(str(v) for v in DEFAULT_HSV),
         help="object colour as lo_h,lo_s,lo_v,hi_h,hi_s,hi_v in OpenCV HSV",
     )
+    parser.add_argument(
+        "--teleop",
+        action="store_true",
+        help=f"start {TELEOP_BLUEPRINT} alongside to jog the arm from the keyboard",
+    )
+    parser.add_argument("--can-port", default="can0")
     args = parser.parse_args()
+
+    if args.teleop:
+        start_teleop(args.can_port)
 
     reference = cv2.imread(str(args.reference), cv2.IMREAD_COLOR)
     if reference is None:

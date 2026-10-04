@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import os
+
 from dimos.control.coordinator import TaskConfig
 from dimos.control.teleop_coordinator import TeleopControlCoordinator
 from dimos.core.coordination.blueprints import autoconnect
@@ -37,14 +39,24 @@ from dimos.robot.manipulators.piper.config import (
     make_piper_hardware,
     make_piper_model_config,
     piper_hardware,
+    piper_joint_offsets_from_env,
 )
 from dimos.teleop.keyboard.keyboard_teleop_module import KeyboardTeleopModule
 
+# PIPER_JUDGE_CAN=0 for a slcan adapter whose can0 reports no bitrate, and
+# PIPER_JOINT_OFFSETS_DEG for an arm whose joint zeros disagree with the URDF,
+# as for the other Piper blueprints.
+_JUDGE_CAN = os.getenv("PIPER_JUDGE_CAN", "1").strip().lower() not in ("0", "false", "no", "off")
 _piper_keyboard_hw = make_piper_hardware(
     "arm",
     adapter_type="piper" if global_config.can_port else "mock",
     address=global_config.can_port or "can0",
     gripper=True,
+    adapter_kwargs=(
+        {"judge_can": _JUDGE_CAN, "joint_offsets": piper_joint_offsets_from_env()}
+        if global_config.can_port
+        else None
+    ),
 )
 _piper_model = make_piper_model_config()
 
