@@ -21,6 +21,8 @@ Scripts live in `scripts/` beside this file. Run them with the project interpret
 
 `scripts/timelapse.py start` records the scene camera, one frame a second, and keeps `latest.jpg` current; `status` prints its path, `render` makes the video so far. Read `latest.jpg` for a third-person view of the arm and the object: the wrist camera cannot see the gripper touch anything, or an object taller than about 15 cm from the scan pose. The recorder owns the camera's colour stream, so do not open it elsewhere.
 
+`scripts/line_up.py reference.png` lines the scene up with a reference wrist-camera image before a run: it blends the live wrist view with the reference and says how far to slide and turn the object, and whether the camera itself has moved. It opens the wrist camera directly, so stop the stack first, or pass a saved frame with `--image`.
+
 `scripts/bottle_cap.py unscrew|screw x y top --watch x0,y0,x1,y1` works the cap of an upright, clamped bottle. It looks before it believes: read the contact sheet it prints the path of.
 
 A tall object is also an obstacle the planner does not know. Before moving near it, register it with `app.ManipulationModule.add_obstacle(name, pose, "cylinder", [radius, height])` and retract upward before turning joint 1 past it.
