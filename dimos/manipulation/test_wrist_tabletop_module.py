@@ -16,6 +16,8 @@ import numpy as np
 import pytest
 
 from dimos.manipulation.wrist_tabletop_module import (
+    WristTabletopConfig,
+    WristTabletopModule,
     back_project,
     color_mask,
     fit_slot_grid,
@@ -89,3 +91,33 @@ def test_back_project_puts_the_image_centre_on_the_optical_axis() -> None:
     points = back_project(mask, depth, intrinsics, world_from_optical, (0.1, 1.0), 1)
     assert points.shape == (1, 3)
     assert points[0] == pytest.approx([0.1, 0.2, 0.0], abs=1e-6)
+
+
+class _Frame:
+    def __init__(self, array: np.ndarray) -> None:
+        self._array = array
+
+    def to_opencv(self) -> np.ndarray:
+        return self._array
+
+
+def _tabletop(color: np.ndarray | None) -> WristTabletopModule:
+    module = WristTabletopModule.__new__(WristTabletopModule)
+    object.__setattr__(module, "config", WristTabletopConfig())
+    frame = None if color is None else (_Frame(color), None, None)
+    object.__setattr__(module, "_frame", lambda: frame)
+    return module
+
+
+def test_object_view_fraction_is_the_share_of_the_frame_in_the_object_colour() -> None:
+    yellow_bgr = (0, 220, 255)
+    image = np.zeros((40, 60, 3), dtype=np.uint8)
+    image[:, :45] = yellow_bgr
+    fraction = WristTabletopModule.object_view_fraction(_tabletop(image))
+    assert fraction == pytest.approx(0.75, abs=0.02)
+
+
+def test_object_view_fraction_without_the_object_or_a_frame() -> None:
+    blank = np.zeros((40, 60, 3), dtype=np.uint8)
+    assert WristTabletopModule.object_view_fraction(_tabletop(blank)) == 0.0
+    assert WristTabletopModule.object_view_fraction(_tabletop(None)) is None

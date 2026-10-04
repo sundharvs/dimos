@@ -23,6 +23,10 @@ not do well:
   threshold of a stored object (and keeps every first sighting), so after a
   container is set down near an old pose its cloud is a union of poses. A fresh
   per-frame segmentation has no memory.
+* ``object_view_fraction``: how much of the colour frame the object's colour
+  fills, with no depth involved. An object held right in front of the lens is
+  closer than the depth sensor's minimum range and yields no cloud, but it fills
+  the picture.
 * ``add_tape_view`` / ``fit_slots``: masking-tape pixels from one or more wrist
   views, back-projected through the depth image onto the table, fitted as a grid
   of lines along the planning frame's X and Y axes. Three slots between four
@@ -71,6 +75,9 @@ class WristTabletopConfig(ModuleConfig):
     table_z_range: tuple[float, float] = (-0.05, 0.03)
     # Depth range (metres along the optical axis) accepted from the sensor.
     depth_range: tuple[float, float] = (0.15, 1.5)
+    # Metres per count of an integer depth image. None guesses millimetres, which
+    # is wrong for a RealSense D405 (0.1 mm): set 0.0001 there.
+    depth_unit_m: float | None = None
     # Pixel stride when back-projecting masks.
     stride: int = Field(default=2, ge=1)
     # Slot grid: names given to the cells between consecutive X lines, from -X to +X,
@@ -285,7 +292,9 @@ class WristTabletopModule(Module):
             return None
         bgr = color.to_opencv()
         depth_m = depth.to_opencv().astype(np.float64)
-        if depth_m.max() > 20.0:  # 16-bit millimetres
+        if self.config.depth_unit_m is not None:
+            depth_m = depth_m * self.config.depth_unit_m
+        elif depth_m.max() > 20.0:  # 16-bit millimetres
             depth_m = depth_m / 1000.0
         if depth_m.shape[:2] != bgr.shape[:2]:
             logger.warning("WristTabletop: depth is not aligned to colour")
@@ -329,6 +338,19 @@ class WristTabletopModule(Module):
         frame = self._frame()
         stamp = float(frame[0].ts) if frame is not None and frame[0].ts else None
         return PointCloud2.from_numpy(points, frame_id=self.config.planning_frame, timestamp=stamp)
+
+    @rpc
+    def object_view_fraction(self) -> float | None:
+        """Share of the latest colour frame covered by the largest blob in the object's
+        HSV range (0..1); None before the first frame."""
+        frame = self._frame()
+        if frame is None:
+            return None
+        mask = color_mask(
+            frame[0].to_opencv(), self.config.object_hsv_low, self.config.object_hsv_high
+        )
+        component = largest_component(mask)
+        return 0.0 if component is None else float(np.count_nonzero(component)) / component.size
 
     @rpc
     def add_tape_view(self) -> int:

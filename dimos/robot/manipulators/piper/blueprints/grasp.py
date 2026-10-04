@@ -29,6 +29,18 @@ is where the grasp point ends up; leave z out to set an object back down on the
 table. Objects must be in the wrist camera's view from the scan pose, about
 x 0.17-0.38 m and y +-0.19 m: one cut off by the edge of the frame is grasped
 off centre.
+
+``dimos run piper-grasp-bin --can-port can0``
+
+The same stack with rim grasps and the ContainerPickModule skills
+(``pick_up_container``, ``set_down_container``, ...) for an open container the
+jaws cannot span: the yellow shelf bin, 29 x 11 x 7.5 cm, found by colour from a
+higher survey pose that sees the whole table in front of the arm.
+
+Origin: autoresearch task "pick up the yellow bin", 2026-10-04. First success by
+script (straddle the arm-side long wall, close, lift, lean back); the skill is
+the xArm's container pick with the Piper's limits in configuration.
+Validation on the arm: see PIPER_BIN_VALIDATION below.
 """
 
 from __future__ import annotations
@@ -36,14 +48,18 @@ from __future__ import annotations
 import math
 import os
 
+from dimos.control.components import HardwareComponent
 from dimos.control.coordinator import TaskConfig
-from dimos.core.coordination.blueprints import autoconnect
+from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
+from dimos.manipulation.container_pick_module import ContainerPickModule
 from dimos.manipulation.grasp_verification import GraspVerificationConfig
 from dimos.manipulation.grasping.heuristic_grasp import HeuristicGraspModule
+from dimos.manipulation.grasping.rim_grasp import RimGraspModule
 from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.manipulation.manipulation_skills import ManipulationSkills
 from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
+from dimos.manipulation.wrist_tabletop_module import WristTabletopModule
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
@@ -88,12 +104,6 @@ PIPER_WRIST_CAMERA_TRANSFORM = Transform(
 )
 
 _JUDGE_CAN = os.getenv("PIPER_JUDGE_CAN", "1").strip().lower() not in ("0", "false", "no", "off")
-_hardware = piper_hardware(
-    "arm",
-    mock_without_address=False,
-    judge_can=_JUDGE_CAN,
-    joint_offsets=piper_joint_offsets_from_env(),
-)
 _model = make_piper_model_config(home_joints=PIPER_GRASP_SCAN_JOINTS, tcp=True).model_copy(
     update={
         "base_pose": PoseStamped(frame_id="world"),
@@ -102,24 +112,78 @@ _model = make_piper_model_config(home_joints=PIPER_GRASP_SCAN_JOINTS, tcp=True).
     }
 )
 
+
+def _piper_hardware(gripper_effort: int | None = None) -> HardwareComponent:
+    return piper_hardware(
+        "arm",
+        mock_without_address=False,
+        judge_can=_JUDGE_CAN,
+        joint_offsets=piper_joint_offsets_from_env(),
+        gripper_effort=gripper_effort,
+    )
+
+
+# Everything but the grasp provider: PickAndPlaceModule resolves its generator by
+# spec, so exactly one may be composed in.
+def _piper_grasp_stack(hardware: HardwareComponent) -> tuple[Blueprint, ...]:
+    return (
+        ManipulationModule.blueprint(
+            model=_model,
+            static_transforms=[PIPER_WRIST_CAMERA_TRANSFORM],
+            planning_timeout=10.0,
+            visualization={"backend": "viser"},
+            world_frame="world",
+        ),
+        ManipulationSkills.blueprint(),
+        PickAndPlaceModule.blueprint(
+            planning_frame="world",
+            pregrasp_offset=PIPER_GRASP_PREGRASP_OFFSET,
+            # A place whose fingertips would be under the table top.
+            min_place_z=PIPER_GRASP_TABLE_Z + PIPER_FINGERTIPS_PAST_TCP,
+            # Commanded fully open (0.08 m) the Piper's jaws stop at 0.84, about
+            # 67 mm, which the default 0.15 tolerance just rejects.
+            grasp_verification=GraspVerificationConfig(open_tolerance=0.2),
+        ),
+        RealSenseCamera.blueprint(
+            enable_pointcloud=True,
+            # With a second RealSense on the rig (a scene camera), name the wrist one.
+            serial_number=os.getenv("PIPER_WRIST_CAMERA_SERIAL") or None,
+        ),
+        ObjectSceneRegistrationModule.blueprint(
+            target_frame="world",
+            detector_backend="moondream",
+            segmentation_backend="edgetam",
+            # The wrist camera is a D405, whose depth unit is 0.1 mm.
+            depth_unit_m=0.0001,
+            detect_on_request=True,
+            # Objects get moved here, and a moved object must not keep the outline
+            # it had before.
+            accumulate_pointclouds=False,
+            distance_threshold=0.05,
+            # One explicit scan must promote what it sees.
+            min_detections_for_permanent=1,
+            max_distance=1.0,
+            use_aabb=True,
+            max_obstacle_width=0.06,
+        ),
+        RerunBridgeModule.blueprint(),
+        coordinator(
+            hardware=[hardware],
+            tasks=[
+                trajectory_task(hardware),
+                TaskConfig(
+                    name="arm_gripper",
+                    type="gripper",
+                    joint_names=["arm/gripper"],
+                    priority=20,
+                ),
+            ],
+        ),
+    )
+
+
 piper_grasp = autoconnect(
-    ManipulationModule.blueprint(
-        model=_model,
-        static_transforms=[PIPER_WRIST_CAMERA_TRANSFORM],
-        planning_timeout=10.0,
-        visualization={"backend": "viser"},
-        world_frame="world",
-    ),
-    ManipulationSkills.blueprint(),
-    PickAndPlaceModule.blueprint(
-        planning_frame="world",
-        pregrasp_offset=PIPER_GRASP_PREGRASP_OFFSET,
-        # A place whose fingertips would be under the table top.
-        min_place_z=PIPER_GRASP_TABLE_Z + PIPER_FINGERTIPS_PAST_TCP,
-        # Commanded fully open (0.08 m) the Piper's jaws stop at 0.84, about
-        # 67 mm, which the default 0.15 tolerance just rejects.
-        grasp_verification=GraspVerificationConfig(open_tolerance=0.2),
-    ),
+    *_piper_grasp_stack(_piper_hardware()),
     HeuristicGraspModule.blueprint(
         fingertip_depth=PIPER_FINGERTIPS_PAST_TCP,
         support_z=PIPER_GRASP_TABLE_Z,
@@ -129,35 +193,99 @@ piper_grasp = autoconnect(
         # Top-down with yaw 0 needs joint 6 at +-180 deg, past its +-120 deg range.
         yaw_offset=math.pi,
     ),
-    RealSenseCamera.blueprint(enable_pointcloud=True),
-    ObjectSceneRegistrationModule.blueprint(
-        target_frame="world",
-        detector_backend="moondream",
-        segmentation_backend="edgetam",
-        # The wrist camera is a D405, whose depth unit is 0.1 mm.
-        depth_unit_m=0.0001,
-        detect_on_request=True,
-        # Objects get moved here, and a moved object must not keep the outline
-        # it had before.
-        accumulate_pointclouds=False,
-        distance_threshold=0.05,
-        # One explicit scan must promote what it sees.
-        min_detections_for_permanent=1,
-        max_distance=1.0,
-        use_aabb=True,
-        max_obstacle_width=0.06,
+)
+
+# --- Container (bin) pick -----------------------------------------------------
+
+# Held-out result of pick_up_container through this blueprint, each trial judged
+# from a scene-camera frame (bin hanging from the jaws, clear of the table).
+PIPER_BIN_VALIDATION = (
+    "2026-10-04: 4 of 5 held-out bin poses lifted clear (centres x 0.26-0.31 m, y -0.08-0.08 m, "
+    "long-axis yaw 50, -81, -3 and 33 deg); the skill's verdict matched the frame on all five. "
+    "The fifth (bin lying along x at 0.31, 0.07) was refused: no IK for the pre-grasp. "
+    "Untested: other containers, a loaded bin, anything outside the survey view."
+)
+
+# Wrist camera 35 cm above the table, looking down at x = 0.29 m: the view spans
+# about x 0.10-0.45 m, y +-0.25 m, the whole shelf bin with a margin. Found with
+# forward kinematics and checked with a frame on 2026-10-04. The tool cannot
+# point straight down from this height (wrist pitch range), so it is a joint pose.
+PIPER_BIN_SURVEY_JOINTS = [0.0, 0.45, -0.7, 0.0, 1.15, 0.0]
+# Lowest TCP height for a wall grasp: the fingertips (2 cm past the TCP) stop
+# 1.5 cm above the table, clear of the bin's floor.
+PIPER_BIN_MIN_Z = PIPER_GRASP_TABLE_Z + PIPER_FINGERTIPS_PAST_TCP + 0.015
+# Guard boxes in world (the arm's base frame). Forward kinematics of the rest,
+# survey, grasp and leaned-back poses puts link6 and the TCP within x 0.05-0.30,
+# z 0.03-0.33 and link3/link4 within x -0.29-0.30, z 0.16-0.42; the boxes add the
+# table in front of the arm and a margin.
+PIPER_BIN_HAND_BOX = ((-0.05, 0.50), (-0.40, 0.40), (0.0, 0.60))
+PIPER_BIN_ELBOW_BOX = ((-0.40, 0.45), (-0.40, 0.40), (0.05, 0.70))
+
+# Closing torque of the jaws for the bin, mN*m. At the adapter's 1000 (1 N*m of
+# the gripper's rated 5) the pinch on the bin's 2 mm wall let it pivot and slide
+# out in 4 of 7 lifts on 2026-10-04, and at 2500 once in three; the operator
+# allowed up to 4000.
+PIPER_BIN_GRIPPER_EFFORT = 4000
+
+piper_grasp_bin = autoconnect(
+    *_piper_grasp_stack(_piper_hardware(PIPER_BIN_GRIPPER_EFFORT)),
+    RimGraspModule.blueprint(
+        min_z=PIPER_BIN_MIN_Z,
+        # The bin's walls are 10 cm tall (top at world z 0.09) with a stacking
+        # step 2.5 cm below the top. TCP 3.3 cm below the top puts the pads
+        # (fingertips 2 cm past the TCP) across the step; that depth held on
+        # 2026-10-04, while 5 cm or more below the top slipped at 1 N*m.
+        insertion_depth=0.033,
+        # A long wall keeps the hanging bin's lever arm at half its width; an end
+        # wall would hang it by 14 cm.
+        sides="long",
     ),
-    RerunBridgeModule.blueprint(),
-    coordinator(
-        hardware=[_hardware],
-        tasks=[
-            trajectory_task(_hardware),
-            TaskConfig(
-                name="arm_gripper",
-                type="gripper",
-                joint_names=["arm/gripper"],
-                priority=20,
-            ),
-        ],
+    WristTabletopModule.blueprint(
+        planning_frame="world",
+        # The yellow shelf bin, as on the xArm.
+        object_hsv_low=(15, 120, 100),
+        object_hsv_high=(40, 255, 255),
+        # The wrist camera is a D405: 0.1 mm depth units, usable from 7 cm, which
+        # is where a held bin is.
+        depth_unit_m=0.0001,
+        depth_range=(0.07, 1.5),
+        # A bin leaned back in the jaws reaches 0.35 m.
+        object_z_range=(-0.04, 0.45),
+    ),
+    ContainerPickModule.blueprint(
+        model=_model.model,
+        planning_frame="world",
+        min_z=PIPER_BIN_MIN_Z,
+        hand_links=["link6", "gripper_tcp"],
+        elbow_links=["link3", "link4"],
+        workspace_box=PIPER_BIN_HAND_BOX,
+        elbow_box=PIPER_BIN_ELBOW_BOX,
+        reach_max=0.45,
+        # Survey to a pre-grasp over the far wall sums to 3.5 rad over six joints.
+        path_max_length=4.5,
+        wrist_joint="joint6",
+        # Tool down, yaw = joint1 - joint6 + pi (forward kinematics, 2026-10-04).
+        wrist_joint_sign=-1.0,
+        survey_joints=PIPER_BIN_SURVEY_JOINTS,
+        planned_approach=True,
+        # The tool points straight down only up to a TCP height of about 0.125 m,
+        # and there only at radii of 0.16-0.32 m (piper_reach.py): pre-grasp and
+        # straight lift stay under it, the lean adds the rest. Leaning joint 2
+        # back 0.35 rad raised the TCP from 0.117 to 0.217 m with the bin held.
+        # Pre-grasp at the top of that band: fingertips 1 cm above the bin's rim.
+        pregrasp_offset=0.062,
+        carry_height=0.04,
+        lift_height=0.04,
+        lift_joint_offsets={"joint2": -0.35},
+        # With the far long wall in the jaws the leaned-back bin hangs straight
+        # down from it; that wall is preferred while it is inside the top-down band.
+        preferred_reach=0.30,
+        # The jaws read 0.002 with the bin hanging in them, as on air: look instead.
+        hold_check="camera",
+        release_exit="up",
+        prompts=["yellow bin", "bin"],
+        container_long_min=0.24,
+        container_short_range=(0.07, 0.14),
+        grasp_verification=GraspVerificationConfig(open_tolerance=0.2),
     ),
 )

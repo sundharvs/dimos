@@ -56,13 +56,31 @@ WHAT IT NEEDS IN THE BLUEPRINT
     (RimGraspModule) and, optionally, a ``WristTabletopSpec`` (colour scans and
     tape slots) and a map-pause capable self filter so the carried container is
     not mapped as an obstacle along the carry.
+
+PORTED TO THE AGILEX PIPER (2026-10-04, task "pick up the yellow bin")
+    Blueprint ``piper-grasp-bin``. What the 6-DoF Piper needed, all configuration:
+    * Its wrist pitch range lets the tool point straight down only below about
+      13 cm, so the survey is a joint pose (``survey_joints``), the pre-grasp is
+      reached with one guarded planned move (``planned_approach``), and the
+      container is raised clear of the table by leaning the shoulder back after a
+      short straight lift (``lift_joint_offsets``), undone before lowering.
+    * At its default 1 N*m the Piper's jaws let the bin's 2 mm wall pivot and
+      slide out; the blueprint closes them at 4 N*m.
+    * The jaw readback is no evidence on that wall: 0.002 with the bin hanging in
+      the jaws, the same as closed on air. The hold is judged by looking
+      (``hold_check="camera"``): after the lift the wrist camera must see the
+      container risen with the hand; seen still on the table means not held. A
+      held bin can hang closer to the lens than the depth range (no cloud); then
+      its colour must fill the frame (``hold_view_fraction``).
+    * The open jaws leave straight up (``release_exit="up"``).
+    Validation on the Piper is recorded in the blueprint's docstring.
 """
 
 from __future__ import annotations
 
 import math
 import time
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -177,6 +195,28 @@ class ContainerPickConfig(ModuleConfig):
     grasp_verification: GraspVerificationConfig = Field(
         default_factory=lambda: GraspVerificationConfig(empty_epsilon=0.012)
     )
+    # Survey from this joint pose (planning-group order) instead of the top-down
+    # Cartesian pose, for an arm that cannot point its tool down at survey height.
+    survey_joints: list[float] | None = None
+    # Reach the pre-grasp with one guarded planned move (position and yaw together)
+    # instead of straight legs and a wrist turn in place; needed when the survey
+    # pose is not top-down.
+    planned_approach: bool = False
+    # Joint offsets (radians, by joint name) applied with a guarded joint move
+    # after the straight lift and undone before lowering: extra height for an arm
+    # whose straight-down lift is short.
+    lift_joint_offsets: dict[str, float] = Field(default_factory=dict)
+    # How the hold is judged after the lift. "gripper": the jaw readback (needs a
+    # wall thick enough to read above empty_epsilon). "camera": the wrist camera's
+    # colour scan must see the container risen by hold_rise_fraction of the lift.
+    hold_check: Literal["gripper", "camera"] = "gripper"
+    hold_rise_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
+    # With no depth on the container after the lift (held closer to the lens than
+    # the depth range), its colour must fill at least this share of the frame.
+    hold_view_fraction: float = Field(default=0.25, gt=0.0, le=1.0)
+    # How the open jaws leave after a set-down: "slide" out over the opening or
+    # along the wall (a finger hooked under a rim lip), or straight "up".
+    release_exit: Literal["slide", "up"] = "slide"
 
 
 def inside(point: NDArray[np.float64], box: Box) -> bool:
@@ -295,6 +335,36 @@ def describe_container(
         "corners": corners,
         "n": len(points),
     }
+
+
+def hold_rise(
+    points: NDArray[np.floating] | None, top_before: float, lifted_by: float, fraction: float
+) -> tuple[bool, str]:
+    """Whether a container cloud seen after the lift shows it came up with the hand.
+
+    ``points`` is the colour scan after the lift (None when nothing was seen),
+    ``top_before`` the rim height before the grasp and ``lifted_by`` how far the
+    hand rose. A container left on the table still has its rim at ``top_before``.
+    """
+    if points is None or len(points) == 0:
+        return False, "the container is not in the wrist camera's view after the lift"
+    top = float(np.quantile(points[:, 2], 0.98))
+    rise = top - top_before
+    needed = fraction * lifted_by
+    seen = f"rim rose {rise * 100:.1f} cm for a {lifted_by * 100:.1f} cm lift"
+    if rise < needed:
+        return False, f"{seen}, under the {needed * 100:.1f} cm that counts as held"
+    return True, seen
+
+
+def hold_fills_view(fraction: float | None, needed: float) -> tuple[bool, str]:
+    """Whether a container that gave no depth cloud after the lift is held in front of the lens."""
+    if fraction is None:
+        return False, "no wrist camera frame after the lift"
+    seen = f"no depth on the container, its colour fills {fraction * 100:.0f}% of the wrist view"
+    if fraction < needed:
+        return False, f"{seen}, under the {needed * 100:.0f}% of one held at the lens"
+    return True, seen
 
 
 class PathGuard:
@@ -466,6 +536,11 @@ class ContainerPickModule(Module):
         """
         if self._holding is None:
             return SkillResult.fail("INVALID_STATE", "Nothing is held")
+        if self._holding.get("leaned"):
+            # The wrist joint turns the container about the vertical only with the tool down.
+            if not self._lean(-1.0):
+                return SkillResult.fail("PLANNING_FAILED", "Could not undo the lift lean")
+            self._holding["leaned"] = False
         ok, applied = self._turn_wrist(math.radians(yaw_degrees))
         if not ok:
             return SkillResult.fail("PLANNING_FAILED", "Wrist rotation rejected by the guards")
@@ -485,6 +560,10 @@ class ContainerPickModule(Module):
         if self._holding is None:
             return SkillResult.fail("INVALID_STATE", "Nothing is held")
         held = self._holding
+        if held.get("leaned"):
+            if not self._lean(-1.0):
+                return SkillResult.fail("PLANNING_FAILED", "Could not undo the lift lean")
+            held["leaned"] = False
         turned = 0.0
         if opening_yaw_degrees is not None:
             if not held["opening_known"]:
@@ -817,8 +896,25 @@ class ContainerPickModule(Module):
                 yaw = nearest_equivalent_yaw(raw_yaw, current_yaw)
             grasp = np.array([float(position.x), float(position.y), grasp_z])
             pregrasp = grasp + np.array([0.0, 0.0, self.config.pregrasp_offset])
-            failure = self._cartesian_to(pregrasp)
-            if failure is not None:
+            if self.config.planned_approach:
+                # The yaw estimate above assumed a top-down start; let the planner
+                # decide which of the two equivalent jaw yaws the wrist can reach.
+                reached = False
+                for option in (yaw, wrap_angle(yaw + math.pi)):
+                    if self._pose_to(option, pregrasp):
+                        yaw, reached = option, True
+                        break
+                if not reached:
+                    attempts.append(
+                        {
+                            "grasp": grasp.tolist(),
+                            "yaw": yaw,
+                            "step": "approach",
+                            "error": "plan rejected",
+                        }
+                    )
+                    continue
+            elif (failure := self._cartesian_to(pregrasp)) is not None:
                 attempts.append(
                     {
                         "grasp": grasp.tolist(),
@@ -828,7 +924,7 @@ class ContainerPickModule(Module):
                     }
                 )
                 continue
-            if not self._rotate_to(yaw, pregrasp):
+            elif not self._rotate_to(yaw, pregrasp):
                 attempts.append(
                     {
                         "grasp": grasp.tolist(),
@@ -851,7 +947,11 @@ class ContainerPickModule(Module):
                 self._cartesian_to(pregrasp)
                 continue
             reading = self._gripper_to(self.config.grasp_verification.closed_position)
-            why = grasp_failure(reading, self.config.grasp_verification)
+            why = (
+                grasp_failure(reading, self.config.grasp_verification)
+                if self.config.hold_check == "gripper"
+                else None
+            )
             if why is not None:
                 attempts.append(
                     {"grasp": grasp.tolist(), "yaw": yaw, "step": "close", "error": why}
@@ -864,12 +964,19 @@ class ContainerPickModule(Module):
             self._cartesian_to(pregrasp)
             lifted = grasp + np.array([0.0, 0.0, self.config.carry_height])
             self._cartesian_to(lifted)
+            leaned = self._lean(1.0)
             time.sleep(self.config.hold_seconds)
             held = self._gripper()
-            still_held = (
-                held is not None
-                and grasp_failure(_settled(held), self.config.grasp_verification) is None
-            )
+            if self.config.hold_check == "camera":
+                still_held, hold_seen = self._seen_held(
+                    float(container["top_z"]), float(self._tcp()[2]) - grasp_z
+                )
+            else:
+                still_held = (
+                    held is not None
+                    and grasp_failure(_settled(held), self.config.grasp_verification) is None
+                )
+                hold_seen = f"readback {held}"
             offset_dir = center - grasp[:2]
             offset_dir = offset_dir / max(float(np.linalg.norm(offset_dir)), 1e-6)
             self._holding = {
@@ -884,11 +991,13 @@ class ContainerPickModule(Module):
                 "turned": 0.0,
                 "container": container,
                 "closed_reading": reading.position,
+                "leaned": leaned,
             }
             self._last = {
                 **self._last,
                 **self._holding,
                 "held_after_lift": held,
+                "hold_seen": hold_seen,
                 "attempts": attempts,
             }
             if not still_held:
@@ -896,7 +1005,7 @@ class ContainerPickModule(Module):
                 self._resume_mapping()
                 return SkillResult.fail(
                     "GRASP_VERIFICATION_FAILED",
-                    f"Container slipped during the lift (readback {held})",
+                    f"Container not held after the lift ({hold_seen})",
                 )
             return SkillResult.ok(
                 "Container lifted",
@@ -904,6 +1013,7 @@ class ContainerPickModule(Module):
                 grasp=grasp.tolist(),
                 yaw=yaw,
                 gripper=held,
+                hold_seen=hold_seen,
                 opening_known=container["opening_known"],
                 attempts=attempts,
             )
@@ -927,7 +1037,9 @@ class ContainerPickModule(Module):
         self._cartesian_to(np.array([tcp[0], tcp[1], held["grasp"][2] + 0.005]))
         self._gripper_to(self.config.grasp_verification.open_position)
         result: dict[str, Any] = {"exit": "none"}
-        if held["opening_known"]:
+        if self.config.release_exit == "up":
+            result = {"exit": "up"}
+        elif held["opening_known"]:
             # Out over the low opening end: the finger inside the container cannot
             # pass a full-height end wall without pushing the container along.
             direction = rotate_xy(np.array(held["opening_dir"]), held["turned"])
@@ -1051,6 +1163,16 @@ class ContainerPickModule(Module):
     ) -> SkillResult[ManipulationSkillError] | None:
         """Put the wrist camera above target_xy at the survey height, tool pointing down."""
         config = self.config
+        if config.survey_joints is not None:
+            names, positions = self._joints()
+            wanted = [float(v) for v in config.survey_joints]
+            if max(abs(a - b) for a, b in zip(wanted, positions, strict=True)) < 0.01:
+                return None
+            if not self._execute_checked(
+                self._plan("joints", JointState(name=names, position=wanted))
+            ):
+                return SkillResult.fail("PLANNING_FAILED", "Survey joint move rejected")
+            return None
         yaw = self._survey_yaw()
         tcp_xy = np.asarray(target_xy, dtype=float) - self._camera_offset(yaw)
         radius = math.hypot(tcp_xy[0], tcp_xy[1])
@@ -1147,12 +1269,45 @@ class ContainerPickModule(Module):
         """Rotate the wrist in place to ``yaw`` (tool pointing down) with a checked plan."""
         if abs(wrap_angle(yaw - self._tcp_yaw())) < 0.05:
             return True
+        return self._pose_to(yaw, position)
+
+    def _pose_to(self, yaw: float, position: NDArray[np.float64]) -> bool:
+        """Checked planned move to ``position`` with the tool pointing down at ``yaw``."""
         pose = PoseStamped(
             frame_id=self.config.planning_frame,
             position=Vector3(*position.tolist()),
             orientation=Quaternion.from_euler(Vector3(-math.pi, 0.0, yaw)),
         )
         return self._execute_checked(self._plan("pose", pose))
+
+    def _lean(self, direction: float) -> bool:
+        """Apply (+1) or undo (-1) ``lift_joint_offsets`` with a checked joint move."""
+        offsets = self.config.lift_joint_offsets
+        if not offsets:
+            return False
+        names, positions = self._joints()
+        target = [
+            position + direction * offsets.get(name, 0.0)
+            for name, position in zip(names, positions, strict=True)
+        ]
+        return self._execute_checked(self._plan("joints", JointState(name=names, position=target)))
+
+    def _seen_held(self, top_before: float, lifted_by: float) -> tuple[bool, str]:
+        """Look at the container with the wrist camera after the lift.
+
+        A container the depth camera sees decides it: risen with the hand, or
+        still on the table. A held container can hang closer to the lens than
+        the depth range and give no cloud; then it must fill the colour frame.
+        """
+        if self._tabletop is None:
+            return False, "hold_check='camera' needs a WristTabletopSpec in the blueprint"
+        cloud = self._tabletop.scan_object_cloud()
+        points = None if cloud is None else cloud.points_f32()
+        if points is not None and len(points) > 0:
+            return hold_rise(points, top_before, lifted_by, self.config.hold_rise_fraction)
+        return hold_fills_view(
+            self._tabletop.object_view_fraction(), self.config.hold_view_fraction
+        )
 
     def _turn_wrist(self, delta: float) -> tuple[bool, float]:
         """Turn the tool about the vertical axis by ``delta`` (planning-frame radians)

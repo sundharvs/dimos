@@ -25,6 +25,8 @@ Scripts live in `scripts/` beside this file. Run them with the project interpret
 
 `scripts/bottle_cap.py unscrew|screw x y top --watch x0,y0,x1,y1` works the cap of an upright, clamped bottle. It looks before it believes: read the contact sheet it prints the path of.
 
+`piper-grasp-bin` picks up the yellow shelf bin by a wall: `app.ContainerPickModule.pick_up_container()`, then `set_down_container(x, y)` (and `rotate_held_container(deg)` in between to leave it in a new pose without the operator). Its verdict comes from the wrist camera; confirm with `latest.jpg`. If a pick reports failure, look before calling it again: the next call opens the jaws. A bin the skill cannot reach (no IK) can be turned by lowering the closed gripper beside one end and `move_linear` across it.
+
 A tall object is also an obstacle the planner does not know. Before moving near it, register it with `app.ManipulationModule.add_obstacle(name, pose, "cylinder", [radius, height])` and retract upward before turning joint 1 past it.
 
 ## What goes wrong

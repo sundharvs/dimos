@@ -156,3 +156,29 @@ object's colour blob rising in it, and writes `trials.jsonl` plus a frame per
 step. The placement research (scramble, pick, turn, place into a slot, verify from
 above, correct) was driven by the scripts kept with its artifacts under
 `~/.local/state/dimos/research/xarm7_bin_place_2026-10-03/` (README there). Porting notes for another arm: [Porting the container pick to the AgileX Piper](/docs/capabilities/manipulation/porting-container-pick-piper.md).
+
+## On the AgileX Piper
+
+`dimos run piper-grasp-bin --can-port can0` composes the same skills for the
+6-DoF Piper (`dimos/robot/manipulators/piper/blueprints/grasp.py`). What differs
+is configuration, each number with its measurement in the blueprint:
+
+- **Survey from a joint pose** (`survey_joints`): the Piper's wrist pitch range
+  lets the tool point straight down only below a TCP height of about 12.5 cm, at
+  radii of 0.16 to 0.32 m, so there is no top-down survey pose.
+- **One planned move to the pre-grasp** (`planned_approach`), trying both
+  equivalent jaw yaws, instead of straight legs and a wrist turn in place.
+- **Lift, then lean** (`lift_joint_offsets`): a 4 cm straight lift, then joint 2
+  leans back 0.35 rad, which raises the hand to about 0.20 m. The lean is undone
+  before a set-down or a turn.
+- **Grip at 4 N*m** (`PIPER_BIN_GRIPPER_EFFORT`): at the adapter's 1 N*m the bin's
+  2 mm wall pivots in the pads and slides out.
+- **The hold is judged by the wrist camera** (`hold_check="camera"`): the jaw
+  readback is 0.002 with the bin hanging in the jaws. After the lift the colour
+  scan must show the bin risen with the hand; a bin hanging closer than the depth
+  range must fill the colour frame instead.
+- **Leave straight up** after a set-down (`release_exit="up"`).
+
+Validation and what is untested: `PIPER_BIN_VALIDATION` in the blueprint. Known
+limits: a bin lying along the arm's X axis around x 0.31 m had no IK solution for
+either jaw yaw; and the pre-grasp must fall inside the top-down band above.

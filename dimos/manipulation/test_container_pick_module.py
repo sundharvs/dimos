@@ -15,17 +15,26 @@
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from dimos.manipulation.container_pick_module import (
     ContainerPickConfig,
     PathGuard,
+    hold_fills_view,
+    hold_rise,
     inside,
     nearest_equivalent_yaw,
     wrap_angle,
 )
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.robot.assets.model import RobotModel
+from dimos.robot.manipulators.piper.blueprints.grasp import (
+    PIPER_BIN_ELBOW_BOX,
+    PIPER_BIN_HAND_BOX,
+    PIPER_BIN_SURVEY_JOINTS,
+    _model as piper_model,
+)
 
 # A planar two-link arm standing on the table: base yaw, then a shoulder that
 # raises a 0.4 m upper arm and a 0.4 m forearm with a tool link at the end.
@@ -193,3 +202,61 @@ def test_describe_container_finds_the_low_end() -> None:
     tall = cloud[cloud[:, 0] < 0.3 + 0.139]
     seen = describe_container(tall, rim)
     assert not seen["opening_known"]
+
+
+def _rim_cloud(top_z: float) -> np.ndarray:
+    rng = np.random.default_rng(3)
+    xy = rng.uniform(-0.05, 0.05, size=(500, 2))
+    z = rng.uniform(top_z - 0.09, top_z, size=(500, 1))
+    return np.hstack([xy, z]).astype(np.float32)
+
+
+def test_hold_rise_accepts_a_container_that_came_up_with_the_hand() -> None:
+    held, seen = hold_rise(_rim_cloud(0.19), top_before=0.09, lifted_by=0.14, fraction=0.5)
+    assert held
+    assert "rose" in seen
+
+
+def test_hold_rise_rejects_a_container_left_on_the_table() -> None:
+    held, seen = hold_rise(_rim_cloud(0.09), top_before=0.09, lifted_by=0.14, fraction=0.5)
+    assert not held
+    assert "under" in seen
+
+
+def test_hold_rise_rejects_no_sighting() -> None:
+    assert not hold_rise(None, top_before=0.09, lifted_by=0.14, fraction=0.5)[0]
+    empty = np.empty((0, 3), dtype=np.float32)
+    assert not hold_rise(empty, top_before=0.09, lifted_by=0.14, fraction=0.5)[0]
+
+
+def test_hold_fills_view_needs_the_colour_to_fill_the_frame() -> None:
+    assert hold_fills_view(0.8, 0.25)[0]
+    assert not hold_fills_view(0.02, 0.25)[0]
+    assert not hold_fills_view(None, 0.25)[0]
+
+
+def test_piper_bin_survey_and_lean_stay_inside_the_guard_boxes() -> None:
+    guard = PathGuard(
+        ContainerPickConfig(
+            model=piper_model.model,
+            hand_links=["link6", "gripper_tcp"],
+            elbow_links=["link3", "link4"],
+            workspace_box=PIPER_BIN_HAND_BOX,
+            elbow_box=PIPER_BIN_ELBOW_BOX,
+            reach_max=0.45,
+            wrist_joint="joint6",
+            path_max_length=4.5,
+        )
+    )
+    names = [f"joint{i}" for i in range(1, 7)]
+    rest = [0.0, 0.03, -0.03, 0.0, 0.08, 0.0]
+    # A wall grasp measured on the arm, then leaned back by joint 2.
+    grasp = [-0.069, 1.623, -1.124, 0.0, 1.160, 1.502]
+    leaned = [grasp[0], grasp[1] - 0.35, *grasp[2:]]
+    for start, end in (
+        (rest, PIPER_BIN_SURVEY_JOINTS),
+        (PIPER_BIN_SURVEY_JOINTS, grasp),
+        (grasp, leaned),
+    ):
+        path = [JointState(name=names, position=list(q)) for q in (start, end)]
+        assert guard.check_path(path) is None

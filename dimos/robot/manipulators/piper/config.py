@@ -142,7 +142,13 @@ def piper_hardware(
     canonical_joint_names: list[str] | None = None,
     judge_can: bool = True,
     joint_offsets: list[float] | None = None,
+    gripper_effort: int | None = None,
 ) -> HardwareComponent:
+    """The Piper as a coordinator hardware component.
+
+    ``gripper_effort`` is the jaws' closing torque in mN*m (piper_sdk GripperCtrl,
+    0 to 5000); None keeps the adapter's default of 1000.
+    """
     if global_config.simulation:
         return make_piper_hardware(
             hw_id,
@@ -167,7 +173,12 @@ def piper_hardware(
         gripper=gripper,
         home_joints=home_joints,
         canonical_joint_names=canonical_joint_names,
-        adapter_kwargs={"judge_can": judge_can, "joint_offsets": joint_offsets},
+        adapter_kwargs={
+            "judge_can": judge_can,
+            "joint_offsets": joint_offsets,
+            # The adapter hands this to GripperCtrl as its effort argument.
+            **({} if gripper_effort is None else {"gripper_speed": gripper_effort}),
+        },
     )
 
 
