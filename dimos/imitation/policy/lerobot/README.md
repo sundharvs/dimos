@@ -43,7 +43,7 @@ either middle-finger grip stops rollout. Release both grips before explicitly
 restarting; releasing a grip alone never resumes the policy.
 
 The runtime calls LeRobot's `predict_action_chunk()` every `replan_steps`
-steps (default 1), postprocesses the entire chunk, clips every action dimension
+steps (default 1; `None` means once per `n_action_steps`), postprocesses the entire chunk, clips every action dimension
 to the checkpoint's recorded data range, and folds it into a temporal ensemble
 (ACT, Algorithm 2): each step's target is the `exp(-temporal_ensemble_coeff * i)`
 weighted mean of every chunk that predicted it, `i = 0` for the oldest (default

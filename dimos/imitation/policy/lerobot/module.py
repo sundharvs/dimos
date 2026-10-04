@@ -99,8 +99,8 @@ class LeRobotPolicyModuleConfig(IsolatedPythonModuleConfig):
     # submission carries the checkpoint's ``n_action_steps`` targets and lands
     # while the previous one is still running, so the coordinator continues from
     # its commanded position instead of stopping at every chunk boundary. Must
-    # not exceed ``n_action_steps``.
-    replan_steps: int = Field(default=1, ge=1)
+    # not exceed ``n_action_steps``; None predicts once per ``n_action_steps``.
+    replan_steps: int | None = Field(default=1, ge=1)
     # Temporal ensembling (ACT, Algorithm 2): every step's target is the
     # exp(-coeff * i)-weighted mean of all chunks that predicted it, i = 0 for
     # the oldest. 0 weighs them uniformly, None executes the newest chunk only.

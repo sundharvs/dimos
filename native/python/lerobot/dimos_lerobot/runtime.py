@@ -397,7 +397,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             len(self.config.joint_names),
         )
         n_action_steps = _positive_int_attribute(policy_config, "n_action_steps")
-        if self.config.replan_steps > n_action_steps:
+        if self.config.replan_steps is not None and self.config.replan_steps > n_action_steps:
             raise ValueError(
                 f"replan_steps {self.config.replan_steps} exceeds the checkpoint's "
                 f"n_action_steps {n_action_steps}"
@@ -518,8 +518,8 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
         them and the step counter skips ahead.
         """
         period = 1.0 / self.config.fps
-        replan = self.config.replan_steps
         horizon = loaded_policy.n_action_steps
+        replan = self.config.replan_steps or horizon
         ensemble = _ActionEnsemble(self.config.temporal_ensemble_coeff)
         gripper_index = self._gripper_index()
         arm = [i for i in range(len(self.config.joint_names)) if i != gripper_index]

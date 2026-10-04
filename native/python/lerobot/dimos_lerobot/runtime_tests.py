@@ -943,6 +943,27 @@ def test_late_submission_skips_the_steps_the_running_trajectory_covered(
     assert steps[:2] == [0, 2]
 
 
+def test_replan_steps_none_predicts_once_per_chunk(
+    make_runtime: RuntimeFactory, tmp_path: Path
+) -> None:
+    policy = FakePolicy(_action_chunk(), n_action_steps=2)
+    module, control = make_runtime(
+        policy, replan_steps=None, temporal_ensemble_coeff=None, rollout_log_dir=str(tmp_path)
+    )
+    _provide_observation(module)
+    _preflight(module)
+    log_path = Path(module.start_rollout()["rollout_log"] or "")
+    wait_until(lambda: control.execute_trajectory.call_count >= 3, timeout=2.0)
+    module.stop_rollout()
+    wait_until(lambda: module.rollout_status()["rollout_log"] is None, timeout=1.0)
+
+    records = [json.loads(line) for line in log_path.read_text().splitlines() if line]
+    chunks = [r for r in records if r["type"] == "chunk"][:3]
+    assert [c["step"] for c in chunks] == [0, 2, 4]
+    assert all(c["executed_steps"] == 2 for c in chunks)
+    assert records[0]["replan_steps"] is None
+
+
 def test_replan_steps_beyond_the_checkpoint_horizon_is_rejected(
     make_runtime: RuntimeFactory,
 ) -> None:
