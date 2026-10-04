@@ -445,6 +445,9 @@ xarm_grasp_keyboard_policy = autoconnect(
         task="xarm7 grasp",
         joint_names=XARM_GRASP_POLICY_JOINTS,
         # Dataset rate: the policy's n_action_steps are executed at this rate.
+        # Inference runs every step (replan_steps=1) with temporal ensembling,
+        # the module defaults; raise replan_steps if a step cannot fit inference
+        # plus the trajectory RPC into 1/fps.
         fps=15.0,
         robot_type="xarm7",
         image_width=848,

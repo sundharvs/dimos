@@ -15,12 +15,14 @@
 """Behavior tests for the isolated LeRobot runtime."""
 
 from collections.abc import Callable, Iterator
+import json
+from pathlib import Path
 from threading import Event, Thread
 import time
 from typing import Any, Protocol
 
 from dimos_lerobot import runtime as policy_runtime
-from dimos_lerobot.runtime import LeRobotPolicyRuntime
+from dimos_lerobot.runtime import LeRobotPolicyRuntime, _ActionEnsemble
 from lerobot.configs.policies import PreTrainedConfig
 import numpy as np
 from numpy.typing import NDArray
@@ -191,7 +193,7 @@ def make_runtime(mocker: pytest_mock.MockerFixture) -> Iterator[RuntimeFactory]:
             task="pick up the test object",
             device=device,
             joint_names=JOINTS,
-            fps=50.0,
+            fps=config.pop("fps", 50.0),
             robot_type="test_arm",
             image_width=5,
             image_height=4,
@@ -303,6 +305,50 @@ def test_gripper_joint_goes_to_the_gripper_stream_not_the_trajectory(
     assert policy.batch is not None
     assert "observation.images.image" in policy.batch
     assert "observation.images.wrist" not in policy.batch
+
+
+def test_rollout_writes_a_jsonl_log_of_chunks_and_joint_states(
+    make_runtime: RuntimeFactory, tmp_path: Path
+) -> None:
+    policy = FakePolicy(_action_chunk(), n_action_steps=2)
+    module, control = make_runtime(policy, rollout_log_dir=str(tmp_path / "logs"))
+    _provide_observation(module)
+
+    _preflight(module)
+    status = module.start_rollout()
+    assert status["active"] is True
+    assert status["rollout_log"] is not None
+    log_path = Path(status["rollout_log"])
+    wait_until(lambda: control.execute_trajectory.call_count >= 1, timeout=1.0)
+    _provide_observation(module)
+    module.stop_rollout()
+    wait_until(lambda: module.rollout_status()["rollout_log"] is None, timeout=1.0)
+
+    records = [json.loads(line) for line in log_path.read_text().splitlines() if line]
+    kinds = [r["type"] for r in records]
+    assert kinds[0] == "header"
+    assert records[0]["joint_names"] == JOINTS
+    assert records[0]["n_action_steps"] == 2
+    assert "joint_state" in kinds
+    chunk = next(r for r in records if r["type"] == "chunk")
+    assert len(chunk["chunk"]) == 3 and len(chunk["chunk"][0]) == len(JOINTS)
+    assert chunk["executed_steps"] == 1
+    assert chunk["step"] == 0
+    assert chunk["sent"] == chunk["chunk"][:2]
+    assert chunk["result"] == "ACCEPTED"
+    assert records[0]["replan_steps"] == 1
+    assert records[0]["temporal_ensemble_coeff"] == pytest.approx(0.01)
+    assert kinds[-1] == "end"
+
+
+def test_rollout_log_can_be_disabled(make_runtime: RuntimeFactory) -> None:
+    policy = FakePolicy(_action_chunk(), n_action_steps=2)
+    module, control = make_runtime(policy, rollout_log_dir=None)
+    _provide_observation(module)
+    _preflight(module)
+    assert module.start_rollout()["rollout_log"] is None
+    wait_until(lambda: control.execute_trajectory.call_count >= 1, timeout=1.0)
+    module.stop_rollout()
 
 
 def test_policy_actions_are_clipped_to_checkpoint_range(make_runtime: RuntimeFactory) -> None:
@@ -488,10 +534,6 @@ def test_trajectory_rejection_cancels_and_latches_rollout_off(
     [
         (lambda config: setattr(config, "n_action_steps", None), "positive int"),
         (lambda config: setattr(config, "n_action_steps", 0), "positive int"),
-        (
-            lambda config: setattr(config, "temporal_ensemble_coeff", 0.01),
-            "temporal ensembling",
-        ),
         (
             lambda config: setattr(
                 config.input_features["observation.images.wrist"],
@@ -760,3 +802,155 @@ def test_stopping_inactive_policy_leaves_planner_trajectory_alone(
     held.right_grip = True
     module._on_teleop_buttons(held)
     control.cancel_trajectory.assert_not_called()
+
+
+class SequencedPolicy(FakePolicy):
+    """A fake policy that answers successive predictions with successive chunks."""
+
+    def __init__(self, chunks: list[NDArray[np.float32]], n_action_steps: int) -> None:
+        super().__init__(chunks[0], n_action_steps=n_action_steps)
+        self.chunks = [torch.from_numpy(c).unsqueeze(0) for c in chunks]
+        self.predictions = 0
+
+    def predict_action_chunk(self, batch: dict[str, object]) -> Tensor:
+        self.batch = dict(batch)
+        chunk = self.chunks[min(self.predictions, len(self.chunks) - 1)]
+        self.predictions += 1
+        self.called.set()
+        return chunk
+
+
+def _constant_chunk(values: list[float]) -> NDArray[np.float32]:
+    return np.array([[v] * len(JOINTS) for v in values], dtype=np.float32)
+
+
+def test_action_ensemble_weighs_the_oldest_chunk_most() -> None:
+    ensemble = _ActionEnsemble(coeff=np.log(2.0))  # weights 1, 1/2, 1/4 ...
+    ensemble.add(0, _constant_chunk([0.0, 0.0, 0.0]))
+    ensemble.add(1, _constant_chunk([3.0, 3.0, 3.0]))
+    ensemble.add(2, _constant_chunk([7.0, 7.0, 7.0]))
+
+    targets = ensemble.targets(2, 4)
+
+    assert targets.shape == (3, len(JOINTS))  # nothing predicted step 5
+    # step 2: (1 * 0 + 1/2 * 3 + 1/4 * 7) / (1 + 1/2 + 1/4)
+    np.testing.assert_allclose(targets[0], (1.5 + 1.75) / 1.75)
+    # step 3: (1 * 3 + 1/2 * 7) / 1.5
+    np.testing.assert_allclose(targets[1], 6.5 / 1.5)
+    np.testing.assert_allclose(targets[2], 7.0)
+
+
+def test_action_ensemble_drops_expired_chunks_and_can_discard_the_last() -> None:
+    ensemble = _ActionEnsemble(coeff=0.0)
+    ensemble.add(0, _constant_chunk([1.0, 1.0]))
+    ensemble.add(2, _constant_chunk([5.0, 5.0]))  # the first chunk ends before step 2
+    np.testing.assert_allclose(ensemble.targets(2, 2), 5.0)
+    ensemble.add(3, _constant_chunk([9.0, 9.0]))
+    ensemble.discard_last()
+    np.testing.assert_allclose(ensemble.targets(3, 1), 5.0)
+    with pytest.raises(ValueError, match="step order"):
+        ensemble.add(1, _constant_chunk([0.0]))
+
+
+def test_action_ensemble_without_coefficient_returns_the_newest_chunk() -> None:
+    ensemble = _ActionEnsemble(coeff=None)
+    ensemble.add(0, _constant_chunk([0.0, 0.0, 0.0]))
+    ensemble.add(1, _constant_chunk([3.0, 3.0, 3.0]))
+    np.testing.assert_allclose(ensemble.targets(1, 2), 3.0)
+
+
+@pytest.mark.parametrize(
+    ("coeff", "expected_first", "expected_second"),
+    [(0.0, 5.5, 6.5), (None, 10.0, 11.0)],
+)
+def test_second_submission_ensembles_the_overlapping_chunks(
+    make_runtime: RuntimeFactory,
+    coeff: float | None,
+    expected_first: float,
+    expected_second: float,
+) -> None:
+    policy = SequencedPolicy(
+        [_constant_chunk([0.0, 1.0, 2.0]), _constant_chunk([10.0, 11.0, 12.0])],
+        n_action_steps=2,
+    )
+    module, control = make_runtime(policy, temporal_ensemble_coeff=coeff)
+    _provide_observation(module)
+    _preflight(module)
+    module.start_rollout()
+    wait_until(lambda: control.execute_trajectory.call_count >= 2, timeout=1.0)
+    module.stop_rollout()
+
+    first = control.execute_trajectory.call_args_list[0].args[0]
+    second = control.execute_trajectory.call_args_list[1].args[0]
+    np.testing.assert_allclose([p.positions for p in first.points[1:]], [[0.0] * 4, [1.0] * 4])
+    assert [p.time_from_start for p in second.points] == [0.0, 0.02, 0.04]
+    # step 1 was predicted by chunk 0 (index 1) and chunk 1 (index 0), step 2 likewise.
+    np.testing.assert_allclose(second.points[1].positions, expected_first)
+    np.testing.assert_allclose(second.points[2].positions, expected_second)
+
+
+def test_replan_steps_overlap_the_running_trajectory(
+    make_runtime: RuntimeFactory, tmp_path: Path
+) -> None:
+    policy = FakePolicy(_action_chunk(), n_action_steps=3)
+    module, control = make_runtime(
+        policy, replan_steps=2, rollout_log_dir=str(tmp_path), temporal_ensemble_coeff=None
+    )
+    _provide_observation(module)
+    _preflight(module)
+    log_path = Path(module.start_rollout()["rollout_log"] or "")
+    wait_until(lambda: control.execute_trajectory.call_count >= 3, timeout=2.0)
+    module.stop_rollout()
+    wait_until(lambda: module.rollout_status()["rollout_log"] is None, timeout=1.0)
+
+    records = [json.loads(line) for line in log_path.read_text().splitlines() if line]
+    chunks = [r for r in records if r["type"] == "chunk"][:3]
+    assert [c["step"] for c in chunks] == [0, 2, 4]
+    assert all(c["executed_steps"] == 2 and len(c["sent"]) == 3 for c in chunks)
+    # Each full 3-step trajectory is replaced after 2 steps at 50 fps.
+    periods = np.diff([c["sent_t"] for c in chunks])
+    assert np.all(periods >= 0.03) and np.all(periods < 0.3)
+    for call in control.execute_trajectory.call_args_list[:3]:
+        assert len(call.args[0].points) == 4
+
+
+def test_late_submission_skips_the_steps_the_running_trajectory_covered(
+    make_runtime: RuntimeFactory, tmp_path: Path
+) -> None:
+    policy = FakePolicy(_action_chunk(), n_action_steps=3)
+    module, control = make_runtime(policy, fps=10.0, rollout_log_dir=str(tmp_path))
+    first = Event()
+
+    def execute_trajectory(*_args: object, **_kwargs: object) -> TrajectoryExecutionResult:
+        if not first.is_set():
+            first.set()
+            time.sleep(0.25)  # one 100 ms step plus a bit of a late RPC
+        return TrajectoryExecutionResult(TrajectoryExecutionStatus.ACCEPTED)
+
+    control.execute_trajectory.side_effect = execute_trajectory
+    _provide_observation(module)
+    _preflight(module)
+    log_path = Path(module.start_rollout()["rollout_log"] or "")
+    wait_until(lambda: control.execute_trajectory.call_count >= 2, timeout=2.0)
+    module.stop_rollout()
+    wait_until(lambda: module.rollout_status()["rollout_log"] is None, timeout=1.0)
+
+    steps = [
+        r["step"]
+        for r in map(json.loads, log_path.read_text().splitlines())
+        if r["type"] == "chunk"
+    ]
+    assert steps[:2] == [0, 2]
+
+
+def test_replan_steps_beyond_the_checkpoint_horizon_is_rejected(
+    make_runtime: RuntimeFactory,
+) -> None:
+    module, control = make_runtime(FakePolicy(_action_chunk(), n_action_steps=2), replan_steps=3)
+    _provide_observation(module)
+
+    status = module.preflight_rollout()
+
+    assert status["policy_ready"] is False
+    assert "replan_steps 3 exceeds" in (status["last_error"] or "")
+    control.execute_trajectory.assert_not_called()

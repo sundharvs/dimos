@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from threading import Condition, Event, RLock, Thread, current_thread
 import time
 from typing import Any
@@ -59,6 +61,56 @@ _ACTION_FEATURE = "action"
 
 RawObservation = dict[str, NDArray[np.uint8] | NDArray[np.float32]]
 
+# Gripper openings closer than this to the last published one are not re-sent.
+_GRIPPER_PUBLISH_TOLERANCE = 0.005
+
+
+class _ActionEnsemble:
+    """Temporal ensembling over overlapping action chunks (ACT, Algorithm 2).
+
+    Chunks are registered with the step their first action targets. The target
+    for a step is the weighted mean of every registered chunk's prediction for
+    it, weights ``exp(-coeff * i)`` with ``i = 0`` for the oldest chunk, as in
+    LeRobot's ``ACTTemporalEnsembler``. ``coeff=None`` disables averaging and
+    returns the newest chunk's prediction.
+    """
+
+    def __init__(self, coeff: float | None) -> None:
+        self._coeff = coeff
+        self._chunks: list[tuple[int, NDArray[np.float32]]] = []
+
+    def add(self, step: int, chunk: NDArray[np.float32]) -> None:
+        """Register ``chunk`` (steps, width) whose first row targets ``step``."""
+        if self._chunks and step < self._chunks[-1][0]:
+            raise ValueError("chunks must be added in step order")
+        self._chunks = [(start, rows) for start, rows in self._chunks if start + len(rows) > step]
+        self._chunks.append((step, chunk))
+
+    def discard_last(self) -> None:
+        if self._chunks:
+            self._chunks.pop()
+
+    def targets(self, step: int, horizon: int) -> NDArray[np.float32]:
+        """Targets for ``step .. step + horizon - 1``, fewer if no chunk reaches that far."""
+        rows: list[NDArray[np.float32]] = []
+        for target_step in range(step, step + horizon):
+            predictions = [
+                chunk[target_step - start]
+                for start, chunk in self._chunks
+                if start <= target_step < start + len(chunk)
+            ]
+            if not predictions:
+                break
+            if self._coeff is None:
+                rows.append(predictions[-1])
+                continue
+            weights = np.exp(-self._coeff * np.arange(len(predictions), dtype=np.float64))
+            stacked = np.asarray(predictions, dtype=np.float64)
+            rows.append(
+                ((weights[:, None] * stacked).sum(axis=0) / weights.sum()).astype(np.float32)
+            )
+        return np.asarray(rows, dtype=np.float32).reshape(len(rows), -1)
+
 
 @dataclass(frozen=True)
 class _LoadedPolicy:
@@ -71,6 +123,27 @@ class _LoadedPolicy:
     n_action_steps: int
     action_lower: NDArray[np.float32]
     action_upper: NDArray[np.float32]
+
+
+class _RolloutLog:
+    """JSON-lines record of one rollout: header, joint states, predicted chunks, end."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self._file = path.open("w", buffering=1)
+        self._lock = RLock()
+
+    def write(self, record: dict[str, Any]) -> None:
+        with self._lock:
+            if self._file.closed:
+                return
+            self._file.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+    def close(self) -> None:
+        with self._lock:
+            if not self._file.closed:
+                self._file.close()
 
 
 class LeRobotPolicyRuntime(LeRobotPolicyModule):
@@ -100,6 +173,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
         self._last_error = None
         self._active = False
         self._manual_control = False
+        self._log: _RolloutLog | None = None
 
     @rpc
     def start(self) -> None:
@@ -180,6 +254,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             self._chunks_accepted = 0
             self._last_error = None
             self._active = True
+            self._open_log()
             self._thread = Thread(
                 target=self._run_rollout,
                 name="lerobot-policy-rollout",
@@ -213,6 +288,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             "policy_ready": self._loaded_policy is not None,
             "observations_ready": observations_ready,
             "chunks_accepted": self._chunks_accepted,
+            "rollout_log": str(self._log.path) if self._log is not None else None,
             "last_error": self._last_error,
         }
 
@@ -234,7 +310,19 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
     def _on_joint_state(self, state: JointState) -> None:
         with self._observation_changed:
             self._latest_joint_state = JointState(state)
+            log = self._log
             self._observation_changed.notify_all()
+        if log is not None:
+            positions = dict(zip(state.name, state.position, strict=False))
+            log.write(
+                {
+                    "type": "joint_state",
+                    "t": float(state.ts),
+                    "pos": [
+                        float(positions.get(name, float("nan"))) for name in self.config.joint_names
+                    ],
+                }
+            )
 
     def _on_teleop_buttons(self, buttons: Buttons) -> None:
         with self._observation_changed:
@@ -308,6 +396,12 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             postprocessor,
             len(self.config.joint_names),
         )
+        n_action_steps = _positive_int_attribute(policy_config, "n_action_steps")
+        if self.config.replan_steps > n_action_steps:
+            raise ValueError(
+                f"replan_steps {self.config.replan_steps} exceeds the checkpoint's "
+                f"n_action_steps {n_action_steps}"
+            )
         return _LoadedPolicy(
             policy=loaded_policy,
             device=device,
@@ -315,7 +409,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             postprocessor=postprocessor,
             use_amp=bool(policy_config.use_amp),
             chunk_size=_optional_int_attribute(policy_config, "chunk_size"),
-            n_action_steps=_positive_int_attribute(policy_config, "n_action_steps"),
+            n_action_steps=n_action_steps,
             action_lower=action_lower,
             action_upper=action_upper,
         )
@@ -332,9 +426,6 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             )
         if _ACTION_FEATURE not in outputs:
             raise ValueError(f"Policy has no {_ACTION_FEATURE!r} output feature")
-        if getattr(policy_config, "temporal_ensemble_coeff", None) is not None:
-            raise ValueError("Policies using temporal ensembling are not supported")
-
         state_shape = tuple(inputs[_STATE_FEATURE].shape)
         image_shape = tuple(inputs[image_feature].shape)
         action_shape = tuple(outputs[_ACTION_FEATURE].shape)
@@ -394,69 +485,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             if self._stop_event.is_set():
                 return
             self._reset_policy(loaded_policy)
-
-            while not self._stop_event.is_set():
-                with self._lock:
-                    image, state, state_ts = self._snapshot_observation(time.time())
-                action_chunk = self._predict(loaded_policy, image, state, task=self.config.task)
-                expected_width = len(self.config.joint_names)
-                if action_chunk.ndim != 3 or action_chunk.shape[0] != 1:
-                    raise RuntimeError(
-                        f"policy returned action chunk shape {action_chunk.shape}, expected "
-                        f"(1, steps, {expected_width})"
-                    )
-                if action_chunk.shape[2] != expected_width:
-                    raise RuntimeError(
-                        f"policy returned action width {action_chunk.shape[2]}, expected {expected_width}"
-                    )
-                if action_chunk.shape[1] < loaded_policy.n_action_steps:
-                    raise RuntimeError(
-                        f"policy returned {action_chunk.shape[1]} action steps, but n_action_steps "
-                        f"is {loaded_policy.n_action_steps}"
-                    )
-                actions = action_chunk[0, : loaded_policy.n_action_steps]
-                if not np.all(np.isfinite(actions)):
-                    raise RuntimeError("policy returned non-finite joint targets")
-                bounded_actions = np.clip(
-                    actions,
-                    loaded_policy.action_lower,
-                    loaded_policy.action_upper,
-                )
-                clipped = np.any(actions != bounded_actions, axis=0)
-                if np.any(clipped):
-                    logger.warning(
-                        "Clipped policy actions to checkpoint range",
-                        joints=[
-                            name
-                            for name, was_clipped in zip(
-                                self.config.joint_names, clipped, strict=True
-                            )
-                            if was_clipped
-                        ],
-                    )
-                actions = bounded_actions
-                if self._stop_event.is_set():
-                    break
-                gripper_index = self._gripper_index()
-                if gripper_index is not None:
-                    # The gripper task owns that joint: hand it the chunk's first
-                    # normalized opening and keep it out of the arm trajectory.
-                    opening = float(np.clip(actions[0, gripper_index], 0.0, 1.0))
-                    self.gripper_command.publish(Float32(data=opening))
-                    arm = [i for i in range(expected_width) if i != gripper_index]
-                    state = state[arm]
-                    actions = actions[:, arm]
-                result = self._control.execute_trajectory(self._trajectory(state, actions))
-                if result.status is TrajectoryExecutionStatus.START_STATE_MISMATCH:
-                    self._wait_for_newer_joint_state(state_ts)
-                    continue
-                if result.status is not TrajectoryExecutionStatus.ACCEPTED:
-                    raise RuntimeError(
-                        result.message or f"trajectory rejected: {result.status.name}"
-                    )
-                with self._lock:
-                    self._chunks_accepted += 1
-                self._stop_event.wait(loaded_policy.n_action_steps / self.config.fps)
+            self._run_steps(loaded_policy)
         except Exception as exc:
             with self._lock:
                 self._last_error = str(exc)
@@ -464,6 +493,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
         finally:
             self._stop_event.set()
             cancellation_error = self._cancel_trajectory()
+            self._close_log(cancellation_error)
             if loaded_policy is not None:
                 self._reset_policy(loaded_policy)
             with self._lock:
@@ -474,6 +504,174 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
                         else cancellation_error
                     )
                 self._active = False
+
+    def _run_steps(self, loaded_policy: _LoadedPolicy) -> None:
+        """Predict every ``replan_steps`` steps and keep the arm on an ensembled trajectory.
+
+        Step ``k`` nominally begins ``k / fps`` after the first submission. Each
+        iteration predicts a chunk for the step about to begin, folds it into
+        the temporal ensemble, and submits the ensemble's next ``n_action_steps``
+        targets timed so the trajectory lands as that step begins. The previous
+        trajectory is still running then, so the coordinator anchors the new one
+        to its commanded position and the arm never stops. Should a submission
+        slip by whole steps, the previous trajectory's remaining targets cover
+        them and the step counter skips ahead.
+        """
+        period = 1.0 / self.config.fps
+        replan = self.config.replan_steps
+        horizon = loaded_policy.n_action_steps
+        ensemble = _ActionEnsemble(self.config.temporal_ensemble_coeff)
+        gripper_index = self._gripper_index()
+        arm = [i for i in range(len(self.config.joint_names)) if i != gripper_index]
+        step = 0
+        clock0: float | None = None  # wall time at which step 0 began
+        lead = 0.0  # prediction + submission latency of the previous iteration
+        rpc_s = 0.0  # submission latency of the previous iteration
+        last_opening: float | None = None
+        while not self._stop_event.is_set():
+            with self._lock:
+                image, state, state_ts = self._snapshot_observation(time.time())
+            t_predict = time.time()
+            raw_chunk = self._predict(loaded_policy, image, state, task=self.config.task)
+            infer_s = time.time() - t_predict
+            chunk, clipped = self._bounded_chunk(loaded_policy, raw_chunk)
+            if self._stop_event.is_set():
+                break
+            if clock0 is not None:
+                # Steps the running trajectory will have passed by the time this one lands.
+                slip = int(max(0.0, time.time() + rpc_s - (clock0 + step * period)) // period)
+                if slip:
+                    logger.warning("Policy submission late, skipping steps", steps=slip, step=step)
+                    step += slip
+            ensemble.add(step, chunk)
+            targets = ensemble.targets(step, horizon)
+            record: dict[str, Any] = {
+                "type": "chunk",
+                "t": t_predict,
+                "step": step,
+                "state_ts": float(state_ts),
+                "state": [float(v) for v in state],
+                "chunk": [[float(v) for v in row] for row in chunk],
+                "executed_steps": replan,
+                "clipped": [bool(v) for v in clipped],
+                "infer_s": infer_s,
+            }
+            if gripper_index is not None:
+                # The gripper task owns that joint: it gets the newest chunk's
+                # first normalized opening (a command, not something to average)
+                # and stays out of the arm trajectory.
+                opening = float(np.clip(chunk[0, gripper_index], 0.0, 1.0))
+                if last_opening is None or abs(opening - last_opening) > _GRIPPER_PUBLISH_TOLERANCE:
+                    self.gripper_command.publish(Float32(data=opening))
+                    last_opening = opening
+                record["gripper_opening"] = opening
+                targets[:, gripper_index] = opening
+            record["sent"] = [[float(v) for v in row] for row in targets]
+            result = self._control.execute_trajectory(self._trajectory(state[arm], targets[:, arm]))
+            sent_t = time.time()
+            rpc_s = sent_t - t_predict - infer_s
+            record["result"] = result.status.name
+            record["sent_t"] = sent_t
+            if self._log is not None:
+                self._log.write(record)
+            if result.status is TrajectoryExecutionStatus.START_STATE_MISMATCH:
+                ensemble.discard_last()
+                self._wait_for_newer_joint_state(state_ts)
+                continue
+            if result.status is not TrajectoryExecutionStatus.ACCEPTED:
+                raise RuntimeError(result.message or f"trajectory rejected: {result.status.name}")
+            with self._lock:
+                self._chunks_accepted += 1
+            # A slow first inference (CUDA warm-up) must not pull the next step forward.
+            lead = min(sent_t - t_predict, period)
+            if clock0 is None:
+                clock0 = sent_t
+            step += replan
+            self._stop_event.wait(max(0.0, clock0 + step * period - lead - time.time()))
+
+    def _bounded_chunk(
+        self, loaded_policy: _LoadedPolicy, action_chunk: NDArray[np.float32]
+    ) -> tuple[NDArray[np.float32], NDArray[np.bool_]]:
+        """Validate a predicted ``(1, steps, width)`` chunk and clip it to the checkpoint range."""
+        expected_width = len(self.config.joint_names)
+        if action_chunk.ndim != 3 or action_chunk.shape[0] != 1:
+            raise RuntimeError(
+                f"policy returned action chunk shape {action_chunk.shape}, expected "
+                f"(1, steps, {expected_width})"
+            )
+        if action_chunk.shape[2] != expected_width:
+            raise RuntimeError(
+                f"policy returned action width {action_chunk.shape[2]}, expected {expected_width}"
+            )
+        if action_chunk.shape[1] < loaded_policy.n_action_steps:
+            raise RuntimeError(
+                f"policy returned {action_chunk.shape[1]} action steps, but n_action_steps "
+                f"is {loaded_policy.n_action_steps}"
+            )
+        actions = action_chunk[0]
+        if not np.all(np.isfinite(actions)):
+            raise RuntimeError("policy returned non-finite joint targets")
+        bounded = np.clip(actions, loaded_policy.action_lower, loaded_policy.action_upper)
+        clipped = np.any(actions != bounded, axis=0)
+        if np.any(clipped):
+            logger.warning(
+                "Clipped policy actions to checkpoint range",
+                joints=[
+                    name
+                    for name, was_clipped in zip(self.config.joint_names, clipped, strict=True)
+                    if was_clipped
+                ],
+            )
+        return np.array(bounded, dtype=np.float32), clipped
+
+    def _open_log(self) -> None:
+        """Start a JSONL log for this rollout (caller holds the lock)."""
+        if self.config.rollout_log_dir is None:
+            return
+        directory = Path(self.config.rollout_log_dir).expanduser()
+        path = directory / time.strftime("rollout_%Y%m%d_%H%M%S.jsonl")
+        try:
+            log = _RolloutLog(path)
+        except OSError as exc:
+            logger.warning("Rollout log disabled", path=str(path), error=str(exc))
+            return
+        loaded = self._loaded_policy
+        log.write(
+            {
+                "type": "header",
+                "t": time.time(),
+                "policy_path": self.config.policy_path,
+                "task": self.config.task,
+                "joint_names": list(self.config.joint_names),
+                "gripper_joint": self.config.gripper_joint,
+                "image_feature": self.config.image_feature,
+                "fps": self.config.fps,
+                "chunk_size": loaded.chunk_size if loaded is not None else None,
+                "n_action_steps": loaded.n_action_steps if loaded is not None else None,
+                "replan_steps": self.config.replan_steps,
+                "temporal_ensemble_coeff": self.config.temporal_ensemble_coeff,
+            }
+        )
+        self._log = log
+        logger.info("Rollout log opened", path=str(path))
+
+    def _close_log(self, cancellation_error: str | None) -> None:
+        with self._lock:
+            log = self._log
+            self._log = None
+            error = self._last_error
+        if log is None:
+            return
+        log.write(
+            {
+                "type": "end",
+                "t": time.time(),
+                "error": error,
+                "cancellation_error": cancellation_error,
+            }
+        )
+        log.close()
+        logger.info("Rollout log closed", path=str(log.path))
 
     @staticmethod
     def _reset_policy(loaded_policy: _LoadedPolicy) -> None:

@@ -21,6 +21,7 @@ from typing import Protocol, TypedDict
 
 from pydantic import Field, ValidationInfo, field_validator
 
+from dimos.constants import STATE_DIR
 from dimos.control.tasks.trajectory_task.trajectory_task import (
     TrajectoryCancellationResult,
     TrajectoryExecutionResult,
@@ -63,6 +64,7 @@ class RolloutStatus(TypedDict):
     observations_ready: bool
     chunks_accepted: int
     last_error: str | None
+    rollout_log: str | None
 
 
 class RolloutControlSpec(Spec, Protocol):
@@ -93,6 +95,19 @@ class LeRobotPolicyModuleConfig(IsolatedPythonModuleConfig):
     # 1 open) rather than a native target: it is kept out of the trajectory and
     # published on ``gripper_command`` for the coordinator's gripper task.
     gripper_joint: str | None = None
+    # Executed steps between inferences (1 = predict every step). Each
+    # submission carries the checkpoint's ``n_action_steps`` targets and lands
+    # while the previous one is still running, so the coordinator continues from
+    # its commanded position instead of stopping at every chunk boundary. Must
+    # not exceed ``n_action_steps``.
+    replan_steps: int = Field(default=1, ge=1)
+    # Temporal ensembling (ACT, Algorithm 2): every step's target is the
+    # exp(-coeff * i)-weighted mean of all chunks that predicted it, i = 0 for
+    # the oldest. 0 weighs them uniformly, None executes the newest chunk only.
+    temporal_ensemble_coeff: float | None = 0.01
+    # Directory for per-rollout JSONL logs (every predicted action chunk plus the
+    # live joint states), plotted by ``tool_plot_rollout.py``. None disables.
+    rollout_log_dir: str | None = str(STATE_DIR / "policy_rollouts")
 
     @field_validator("policy_path")
     @classmethod
