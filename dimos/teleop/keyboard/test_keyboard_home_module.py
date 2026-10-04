@@ -59,7 +59,7 @@ def test_home_key_calls_go_home_once_while_in_flight(module: KeyboardHomeModule)
     assert module.send_home() is False  # already homing
     module._on_key(KeyPress(key="z", ts=0.0))
     release.set()
-    wait_until(lambda: not (module._thread and module._thread.is_alive()), timeout=1.0)
+    wait_until(lambda: not module._flight.busy, timeout=1.0)
     assert module._home.go_home.call_count == 1
 
     assert module.send_home() is True

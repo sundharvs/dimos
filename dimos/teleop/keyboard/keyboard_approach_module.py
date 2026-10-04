@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Send the arm to its home preset from the teleop keyboard."""
+"""Find a prompted object and move near it from the teleop keyboard."""
 
 from __future__ import annotations
 
 from typing import Any, Protocol
 
+from pydantic import Field
 from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
@@ -28,35 +29,39 @@ from dimos.spec.utils import Spec
 from dimos.teleop.keyboard.single_flight import SingleFlight
 
 
-class HomeSpec(Spec, Protocol):
-    """Whatever module can move the arm home: ``ManipulationSkills`` in the arm stacks."""
+class ApproachSpec(Spec, Protocol):
+    """Whatever module scans and moves near: ``PickAndPlaceModule`` in the arm stacks."""
 
-    def go_home(self) -> Any: ...
+    def find_and_move_near(self, prompts: list[str], distance: float = 0.01) -> Any: ...
 
 
-class KeyboardHomeModuleConfig(ModuleConfig):
+class KeyboardApproachModuleConfig(ModuleConfig):
     # pygame key name, as KeyboardTeleopModule publishes it.
-    home_key: str = "z"
+    approach_key: str = "n"
+    # Object labels to scan for; the first detection is approached.
+    prompts: list[str] = Field(min_length=1)
+    # Standoff from the grasp point along its approach axis, in meters.
+    distance: float = Field(default=0.05, gt=0.0)
 
 
-class KeyboardHomeModule(Module):
-    """Call ``go_home()`` on the home provider when the home key is pressed.
+class KeyboardApproachModule(Module):
+    """Call ``find_and_move_near(prompts, distance)`` when the approach key is pressed.
 
-    Planning and executing the motion block for seconds, so the call runs on a
+    Scanning, planning and executing block for seconds, so the call runs on a
     worker thread; presses while one is in flight are ignored. The trajectory
     task outranks the keyboard's twist task, so the arm follows the planned
     motion and is the keyboard's again once it arrives.
     """
 
-    config: KeyboardHomeModuleConfig
+    config: KeyboardApproachModuleConfig
 
     keyboard: In[KeyPress]
 
-    _home: HomeSpec
+    _approach: ApproachSpec
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._flight = SingleFlight("keyboard-home")
+        self._flight = SingleFlight("keyboard-approach")
 
     @rpc
     def start(self) -> None:
@@ -68,13 +73,17 @@ class KeyboardHomeModule(Module):
         super().stop()
 
     @rpc
-    def send_home(self) -> bool:
-        """Start homing unless one is already in flight; True when started."""
-        return self._flight.start(self._home.go_home)
+    def approach(self) -> bool:
+        """Start the configured scan-and-approach unless one is in flight; True when started."""
+        return self._flight.start(
+            lambda: self._approach.find_and_move_near(
+                list(self.config.prompts), distance=self.config.distance
+            )
+        )
 
     def _on_key(self, press: KeyPress) -> None:
-        if press.key == self.config.home_key:
-            self.send_home()
+        if press.key == self.config.approach_key:
+            self.approach()
 
 
-keyboard_home = KeyboardHomeModule.blueprint
+keyboard_approach = KeyboardApproachModule.blueprint

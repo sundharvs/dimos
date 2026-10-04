@@ -72,6 +72,7 @@ from dimos.robot.manipulators.xarm.config import (
     xarm7_hardware,
 )
 from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
+from dimos.teleop.keyboard.keyboard_approach_module import KeyboardApproachModule
 from dimos.teleop.keyboard.keyboard_home_module import KeyboardHomeModule
 from dimos.teleop.keyboard.keyboard_teleop_module import KeyboardTeleopModule
 from dimos.utils.data import LfsPath
@@ -332,13 +333,31 @@ _XARM_GRASP_KEYBOARD_COORDINATOR = coordinator(
 # Z plans to XARM_GRASP_HOME_JOINTS through ManipulationSkills.go_home, which
 # also opens the gripper. The trajectory outranks the twist task, so the arm
 # is the keyboard's again as soon as it arrives.
-XARM_GRASP_KEYBOARD_HELP = [("Z", "Go home (opens the gripper)")]
+# N scans for the bag handle and holds the gripper XARM_GRASP_APPROACH_DISTANCE
+# off the best grasp through PickAndPlaceModule.find_and_move_near: the
+# pre-grasp of the keyboard-teleop episodes without jogging there by hand.
+XARM_GRASP_APPROACH_PROMPTS = ["handle of gray bag", "bag handle"]
+XARM_GRASP_APPROACH_DISTANCE = 0.05
+XARM_GRASP_KEYBOARD_HELP = [
+    ("Z", "Go home (opens the gripper)"),
+    ("N", f"Find the bag handle, hold {XARM_GRASP_APPROACH_DISTANCE * 100:.0f} cm off it"),
+]
+
+
+def _keyboard_actions() -> tuple[Blueprint, ...]:
+    return (
+        KeyboardHomeModule.blueprint(),
+        KeyboardApproachModule.blueprint(
+            prompts=XARM_GRASP_APPROACH_PROMPTS, distance=XARM_GRASP_APPROACH_DISTANCE
+        ),
+    )
+
 
 _XARM_GRASP_KEYBOARD_MODULES = (
     *_XARM_GRASP_STACK,
     _XARM_GRASP_KEYBOARD_COORDINATOR,
     KeyboardTeleopModule.blueprint(extra_controls=XARM_GRASP_KEYBOARD_HELP),
-    KeyboardHomeModule.blueprint(),
+    *_keyboard_actions(),
 )
 
 xarm_grasp_keyboard = autoconnect(
@@ -406,7 +425,7 @@ xarm_grasp_keyboard_collect = autoconnect(
     KeyboardTeleopModule.blueprint(
         extra_controls=[*XARM_GRASP_KEYBOARD_HELP, *XARM_GRASP_EPISODE_HELP]
     ),
-    KeyboardHomeModule.blueprint(),
+    *_keyboard_actions(),
     HeuristicGraspModule.blueprint(),
     EpisodeMonitorModule.blueprint(
         keyboard_map=XARM_GRASP_EPISODE_KEYS,

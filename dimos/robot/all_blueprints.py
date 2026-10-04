@@ -282,6 +282,7 @@ all_modules = {
     "hosted-stats-module": "dimos.teleop.hosted.hosted_stats.HostedStatsModule",
     "joint-trajectory-controller": "dimos.manipulation.control.trajectory_controller.joint_trajectory_controller.JointTrajectoryController",
     "joystick-module": "dimos.robot.unitree.b1.joystick_module.JoystickModule",
+    "keyboard-approach-module": "dimos.teleop.keyboard.keyboard_approach_module.KeyboardApproachModule",
     "keyboard-home-module": "dimos.teleop.keyboard.keyboard_home_module.KeyboardHomeModule",
     "keyboard-teleop": "dimos.robot.unitree.keyboard_teleop.KeyboardTeleop",
     "keyboard-teleop-module": "dimos.teleop.keyboard.keyboard_teleop_module.KeyboardTeleopModule",
