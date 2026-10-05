@@ -190,8 +190,9 @@ def piper_wrist_camera_serial_from_env() -> str | None:
     """The wrist RealSense's serial number from ``PIPER_WRIST_CAMERA_SERIAL``.
 
     Without one the driver opens whichever RealSense it finds first, which on a
-    rig with a second (scene) RealSense may not be the wrist camera. Unset means
-    the first found.
+    rig with a second (scene) RealSense may not be the wrist camera. This is
+    librealsense's serial, not the USB serial in the ``/dev/v4l/by-id`` name.
+    Unset means the first found.
     """
     return os.getenv("PIPER_WRIST_CAMERA_SERIAL", "").strip() or None
 
