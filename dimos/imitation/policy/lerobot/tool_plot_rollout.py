@@ -148,6 +148,11 @@ def sent_origin(chunk: dict[str, Any]) -> float:
     return float(chunk.get("sent_t", chunk["t"]))
 
 
+def sent_offset(chunk: dict[str, Any]) -> int:
+    """Steps the first sent target was delayed by (a first-step ramp), else 0."""
+    return int(chunk.get("sent_offset", 0))
+
+
 def commanded_speed(rollout: Rollout, chunk: dict[str, Any]) -> NDArray[np.float64]:
     """Joint-space speed (rad/s) between consecutive sent arm targets, prefixed with the step from the state."""
     arm = rollout.arm_indices
@@ -155,6 +160,8 @@ def commanded_speed(rollout: Rollout, chunk: dict[str, Any]) -> NDArray[np.float
     state = np.asarray(chunk["state"], dtype=np.float64)[arm]
     path = np.vstack([state, actions])
     speeds: NDArray[np.float64] = np.linalg.norm(np.diff(path, axis=0), axis=1) * rollout.fps
+    # A first-step ramp spreads the move to the first target over the skipped steps.
+    speeds[0] /= sent_offset(chunk) + 1
     return speeds
 
 
@@ -277,7 +284,7 @@ def plot_rollout(
             n_exec = min(int(c["executed_steps"]), sent.shape[0])
             steps = sent.shape[0] if horizon is None else min(horizon, sent.shape[0])
             start = sent_origin(c) - origin
-            ts = start + (np.arange(steps) + 1) / rollout.fps
+            ts = start + (np.arange(steps) + 1 + sent_offset(c)) / rollout.fps
             color = cmap(k % 20)
             ax.plot([c["t"] - origin], [c["state"][j]], marker="o", ms=3, color=color, zorder=4)
             ax.plot(
@@ -320,7 +327,7 @@ def plot_rollout(
     for k, c in enumerate(rollout.chunks):
         sp = commanded_speed(rollout, c)
         n_exec = min(int(c["executed_steps"]), len(sp))
-        ts = sent_origin(c) - origin + (np.arange(len(sp)) + 1) / rollout.fps
+        ts = sent_origin(c) - origin + (np.arange(len(sp)) + 1 + sent_offset(c)) / rollout.fps
         ax.step(
             ts[:n_exec],
             sp[:n_exec],

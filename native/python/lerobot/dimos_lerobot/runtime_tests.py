@@ -22,7 +22,7 @@ import time
 from typing import Any, Protocol
 
 from dimos_lerobot import runtime as policy_runtime
-from dimos_lerobot.runtime import LeRobotPolicyRuntime, _ActionEnsemble
+from dimos_lerobot.runtime import LeRobotPolicyRuntime, _ActionEnsemble, _ramp_first_step
 from lerobot.configs.policies import PreTrainedConfig
 import numpy as np
 from numpy.typing import NDArray
@@ -952,6 +952,42 @@ def test_late_submission_skips_the_steps_the_running_trajectory_covered(
         if r["type"] == "chunk"
     ]
     assert steps[:2] == [0, 2]
+
+
+def test_ramp_first_step_skips_targets_the_arm_cannot_reach() -> None:
+    anchor = np.zeros(2, dtype=np.float32)
+    targets = _constant_chunk([0.1, 0.11, 0.12, 0.13])[:, :2]
+    assert _ramp_first_step(anchor, targets, max_step=1.0) == 0
+    # |targets[0] - anchor| = 0.1414, at 0.05 per step that is 3 steps: skip 2.
+    assert _ramp_first_step(anchor, targets, max_step=0.05) == 2
+    assert _ramp_first_step(anchor, targets, max_step=0.001) == 3  # never past the last target
+
+
+def test_first_step_speed_ramps_into_the_chunk_instead_of_lunging(
+    make_runtime: RuntimeFactory, tmp_path: Path
+) -> None:
+    actions = _constant_chunk([0.3, 0.31, 0.32])  # 0.6 rad from a zero state in joint space
+    policy = FakePolicy(actions, n_action_steps=3)
+    # 5 rad/s at 50 fps = 0.1 rad per step: 0.6 rad needs 6 steps, capped at the last target.
+    module, control = make_runtime(
+        policy,
+        replan_steps=None,
+        temporal_ensemble_coeff=None,
+        first_step_speed=5.0,
+        rollout_log_dir=str(tmp_path),
+    )
+    _provide_observation(module, positions=[0.0] * len(JOINTS))
+    _preflight(module)
+    log_path = Path(module.start_rollout()["rollout_log"] or "")
+    wait_until(lambda: control.execute_trajectory.call_count >= 1, timeout=1.0)
+    module.stop_rollout()
+    wait_until(lambda: module.rollout_status()["rollout_log"] is None, timeout=1.0)
+
+    trajectory = control.execute_trajectory.call_args_list[0].args[0]
+    assert [p.time_from_start for p in trajectory.points] == [0.0, pytest.approx(0.06)]
+    np.testing.assert_allclose(trajectory.points[1].positions, actions[2])
+    chunk = next(json.loads(l) for l in log_path.read_text().splitlines() if '"chunk"' in l)
+    assert chunk["sent_offset"] == 2 and len(chunk["sent"]) == 1 and chunk["executed_steps"] == 1
 
 
 def test_replan_steps_none_predicts_once_per_chunk(

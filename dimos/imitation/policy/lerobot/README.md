@@ -48,7 +48,10 @@ to the checkpoint's recorded data range, and folds it into a temporal ensemble
 (ACT, Algorithm 2): each step's target is the `exp(-temporal_ensemble_coeff * i)`
 weighted mean of every chunk that predicted it, `i = 0` for the oldest (default
 coefficient 0.01, LeRobot's; `None` executes the newest chunk only;
-`ensemble_window` caps how many of the newest chunks take part). Each
+`ensemble_window` caps how many of the newest chunks take part). With
+`first_step_speed` set, a submission whose first target lies further from the
+arm than that speed allows in one step ramps there instead, skipping the
+targets the ramp overtakes, so a chunk boundary never lunges. Each
 submission carries the ensemble's next `n_action_steps` targets at the
 configured `fps` and lands while the previous trajectory is still running, so
 the coordinator continues from its commanded position instead of stopping at

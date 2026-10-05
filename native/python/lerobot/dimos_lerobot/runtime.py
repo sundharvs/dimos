@@ -65,6 +65,21 @@ RawObservation = dict[str, NDArray[np.uint8] | NDArray[np.float32]]
 _GRIPPER_PUBLISH_TOLERANCE = 0.005
 
 
+def _ramp_first_step(
+    anchor: NDArray[np.float32], targets: NDArray[np.float32], max_step: float
+) -> int:
+    """Steps to skip so the arm reaches a submission's first kept target at ``max_step`` per step.
+
+    The first kept target stays at its nominal time, so the trajectory ramps
+    from ``anchor`` to it over the skipped steps plus one instead of lunging
+    there in a single step.
+    """
+    distance = float(np.linalg.norm(targets[0] - anchor))
+    if distance <= max_step:
+        return 0
+    return min(int(np.ceil(distance / max_step)) - 1, len(targets) - 1)
+
+
 class _ActionEnsemble:
     """Temporal ensembling over overlapping action chunks (ACT, Algorithm 2).
 
@@ -570,8 +585,18 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
                     last_opening = opening
                 record["gripper_opening"] = opening
                 targets[:, gripper_index] = opening
+            skipped = 0
+            if self.config.first_step_speed is not None:
+                skipped = _ramp_first_step(
+                    state[arm], targets[:, arm], self.config.first_step_speed * period
+                )
+                targets = targets[skipped:]
+                record["executed_steps"] = max(1, replan - skipped)
             record["sent"] = [[float(v) for v in row] for row in targets]
-            result = self._control.execute_trajectory(self._trajectory(state[arm], targets[:, arm]))
+            record["sent_offset"] = skipped
+            result = self._control.execute_trajectory(
+                self._trajectory(state[arm], targets[:, arm], skipped)
+            )
             sent_t = time.time()
             rpc_s = sent_t - t_predict - infer_s
             record["result"] = result.status.name
@@ -655,6 +680,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
                 "replan_steps": self.config.replan_steps,
                 "temporal_ensemble_coeff": self.config.temporal_ensemble_coeff,
                 "ensemble_window": self.config.ensemble_window,
+                "first_step_speed": self.config.first_step_speed,
                 "label": self.config.label,
             }
         )
@@ -716,6 +742,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
         self,
         state: NDArray[np.float32],
         actions: NDArray[np.float32],
+        skipped_steps: int = 0,
     ) -> JointTrajectory:
         joint_names = self._arm_joint_names()
         zeros = [0.0] * len(joint_names)
@@ -730,7 +757,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
             TrajectoryPoint(
                 positions=[float(value) for value in action],
                 velocities=zeros,
-                time_from_start=(index + 1) / self.config.fps,
+                time_from_start=(index + 1 + skipped_steps) / self.config.fps,
             )
             for index, action in enumerate(actions)
         )

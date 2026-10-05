@@ -109,6 +109,12 @@ class LeRobotPolicyModuleConfig(IsolatedPythonModuleConfig):
     # averaged over at most N predictions instead of every chunk that reaches
     # it (up to chunk_size). None keeps them all.
     ensemble_window: int | None = Field(default=None, ge=1)
+    # Cap, in joint-space rad/s, on the move from the arm's current position to
+    # a new submission's first target. A chunk's first action often lies well
+    # ahead of the observed state; instead of a one-step lunge the trajectory
+    # ramps there at this speed, skipping the targets the ramp overtakes.
+    # None sends every target at its nominal time.
+    first_step_speed: float | None = Field(default=None, gt=0.0)
     # Free-text tag written to every rollout log header, e.g. the execution
     # mode under study, so logs can be grouped afterwards.
     label: str = ""
