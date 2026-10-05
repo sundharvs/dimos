@@ -489,6 +489,10 @@ XARM_GRASP_POLICY_MODES: dict[str, dict[str, Any]] = {
     # weighted most (exp(0.3 * age) falls to 5% after ten chunks): keeps the
     # smoothing while the arm tracks the latest prediction within a few steps.
     "ensemble-new": {"replan_steps": 1, "temporal_ensemble_coeff": -0.3},
+    # Chunked execution, but the move into each new chunk's first target is
+    # capped at a demo-like 0.2 rad/s: the 1 Hz lunge becomes a short ramp and
+    # the chunk interior, which carries the intent, runs as predicted.
+    "ramp": {"replan_steps": None, "temporal_ensemble_coeff": None, "first_step_speed": 0.2},
 }
 _DEFAULT_POLICY_MODE = "ensemble"
 
