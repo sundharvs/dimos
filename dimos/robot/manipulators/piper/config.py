@@ -142,6 +142,7 @@ def piper_hardware(
     canonical_joint_names: list[str] | None = None,
     judge_can: bool = True,
     joint_offsets: list[float] | None = None,
+    gripper_effort: int | None = None,
 ) -> HardwareComponent:
     if global_config.simulation:
         return make_piper_hardware(
@@ -167,7 +168,12 @@ def piper_hardware(
         gripper=gripper,
         home_joints=home_joints,
         canonical_joint_names=canonical_joint_names,
-        adapter_kwargs={"judge_can": judge_can, "joint_offsets": joint_offsets},
+        adapter_kwargs={
+            "judge_can": judge_can,
+            "joint_offsets": joint_offsets,
+            # The adapter's "gripper_speed" is the SDK's effort argument, in mN.m.
+            **({"gripper_speed": gripper_effort} if gripper_effort is not None else {}),
+        },
     )
 
 

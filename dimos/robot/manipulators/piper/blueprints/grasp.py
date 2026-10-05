@@ -87,12 +87,20 @@ PIPER_WRIST_CAMERA_TRANSFORM = Transform(
     child_frame_id="camera_link",
 )
 
+# The wrist D405's serial; without it the driver may open another RealSense on the machine.
+PIPER_WRIST_CAMERA_SERIAL = os.getenv("PIPER_WRIST_CAMERA_SERIAL") or None
+
+# The jaws' torque limit in mN.m; unset leaves the adapter's default, 1000 (of 5000).
+_GRIPPER_EFFORT = os.getenv("PIPER_GRIPPER_EFFORT", "").strip()
+PIPER_GRIPPER_EFFORT = int(_GRIPPER_EFFORT) if _GRIPPER_EFFORT else None
+
 _JUDGE_CAN = os.getenv("PIPER_JUDGE_CAN", "1").strip().lower() not in ("0", "false", "no", "off")
 _hardware = piper_hardware(
     "arm",
     mock_without_address=False,
     judge_can=_JUDGE_CAN,
     joint_offsets=piper_joint_offsets_from_env(),
+    gripper_effort=PIPER_GRIPPER_EFFORT,
 )
 _model = make_piper_model_config(home_joints=PIPER_GRASP_SCAN_JOINTS, tcp=True).model_copy(
     update={
@@ -129,7 +137,7 @@ piper_grasp = autoconnect(
         # Top-down with yaw 0 needs joint 6 at +-180 deg, past its +-120 deg range.
         yaw_offset=math.pi,
     ),
-    RealSenseCamera.blueprint(enable_pointcloud=True),
+    RealSenseCamera.blueprint(enable_pointcloud=True, serial_number=PIPER_WRIST_CAMERA_SERIAL),
     ObjectSceneRegistrationModule.blueprint(
         target_frame="world",
         detector_backend="moondream",
