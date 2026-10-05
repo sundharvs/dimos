@@ -292,11 +292,11 @@ class RimGraspModule(Module):
             wall_yaw: Direction the rim runs in, radians.
             planning_group: Gripper-capable pose group; omit when there is only one.
         """
-        if self._held_at is not None:
-            return SkillResult.fail("INVALID_STATE", "Release the held container first")
         group = self._resolve_group(planning_group)
         if group is None:
             return SkillResult.fail("ROBOT_NOT_FOUND", "Gripper pose group is missing or ambiguous")
+        if self._holding(group):
+            return SkillResult.fail("INVALID_STATE", "Release the held container first")
         if failure := self._gripper(self.config.gripper.open_position, group):
             return failure
 
@@ -375,11 +375,11 @@ class RimGraspModule(Module):
         Args:
             planning_group: Gripper-capable pose group; omit when there is only one.
         """
-        if self._held_at is None:
-            return SkillResult.fail("INVALID_STATE", "No container is held")
         group = self._resolve_group(planning_group)
         if group is None:
             return SkillResult.fail("ROBOT_NOT_FOUND", "Gripper pose group is missing or ambiguous")
+        if not self._holding(group):
+            return SkillResult.fail("INVALID_STATE", "No container is held")
         if failure := self._linear(-self.config.lift_height, group, "lowering"):
             return failure
         if failure := self._gripper(self.config.gripper.open_position, group):
@@ -388,6 +388,16 @@ class RimGraspModule(Module):
         if failure := self._linear(self.config.pregrasp_offset, group, "retract"):
             return failure
         return SkillResult.ok("Container released on the table")
+
+    def _holding(self, group: PlanningGroupID) -> bool:
+        """Whether a grasp_rim hold is still on: jaws opened by anyone else end it."""
+        if self._held_at is None:
+            return False
+        position = self._manipulation.get_state().groups[group].gripper_position
+        gripper = self.config.gripper
+        if position is not None and position > gripper.open_position - gripper.open_tolerance:
+            self._held_at = None
+        return self._held_at is not None
 
     def _measure_rim(self) -> RimEstimate | SkillResult[ManipulationSkillError]:
         cloud = self._cloud()

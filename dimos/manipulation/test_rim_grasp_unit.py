@@ -125,6 +125,9 @@ def module(monkeypatch: pytest.MonkeyPatch) -> Iterator[RimGraspModule]:
     instance._manipulation.list_planning_groups.return_value = [
         SimpleNamespace(id="arm/tool", has_gripper=True, tip_frame="tool")
     ]
+    instance._manipulation.get_state.return_value = SimpleNamespace(
+        groups={"arm/tool": SimpleNamespace(gripper_position=0.0)}
+    )
     instance._manipulation.plan_to_poses.return_value = SimpleNamespace(succeeded=True, message="")
     instance._manipulation.execute.return_value = SimpleNamespace(succeeded=True, message="")
     instance._manipulation.move_linear.return_value = SimpleNamespace(
@@ -187,3 +190,17 @@ def test_grasp_rim_tries_the_other_half_turn_when_the_first_is_unreachable(
 
     assert module.grasp_rim(0.30, 0.0, 0.10, math.pi / 2).success
     assert module._manipulation.plan_to_poses.call_count == 2  # type: ignore[attr-defined]
+
+
+def test_a_hold_ends_when_the_jaws_are_found_open(module: RimGraspModule) -> None:
+    _clouds(module, _bin_lifted(module.config.lift_height))
+    assert module.grasp_rim(0.30, 0.0, 0.10, math.pi / 2).success
+    assert module.grasp_rim(0.30, 0.0, 0.10, math.pi / 2).error_code == "INVALID_STATE"
+
+    module._manipulation.get_state.return_value = SimpleNamespace(  # type: ignore[attr-defined]
+        groups={"arm/tool": SimpleNamespace(gripper_position=0.87)}
+    )
+    _clouds(module, _bin_lifted(module.config.lift_height))
+
+    assert module.release_rim().error_code == "INVALID_STATE"
+    assert module.grasp_rim(0.30, 0.0, 0.10, math.pi / 2).success
