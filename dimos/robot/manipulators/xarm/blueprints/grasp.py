@@ -482,6 +482,9 @@ XARM_GRASP_POLICY_MODES: dict[str, dict[str, Any]] = {
     # Inference every step, newest chunk only: the arm chases the policy's
     # latest intent continuously, LeRobot's n_action_steps=1 deployment.
     "newest": {"replan_steps": 1, "temporal_ensemble_coeff": None},
+    # Inference every step, uniform average of the newest 5 chunks only: the
+    # smoothing of an ensemble with a third of a second of lag instead of three.
+    "ensemble-recent": {"replan_steps": 1, "temporal_ensemble_coeff": 0.0, "ensemble_window": 5},
 }
 _DEFAULT_POLICY_MODE = "ensemble"
 

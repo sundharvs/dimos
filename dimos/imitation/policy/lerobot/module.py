@@ -105,6 +105,10 @@ class LeRobotPolicyModuleConfig(IsolatedPythonModuleConfig):
     # exp(-coeff * i)-weighted mean of all chunks that predicted it, i = 0 for
     # the oldest. 0 weighs them uniformly, None executes the newest chunk only.
     temporal_ensemble_coeff: float | None = 0.01
+    # Keep only the newest N overlapping chunks in the ensemble, so a target is
+    # averaged over at most N predictions instead of every chunk that reaches
+    # it (up to chunk_size). None keeps them all.
+    ensemble_window: int | None = Field(default=None, ge=1)
     # Free-text tag written to every rollout log header, e.g. the execution
     # mode under study, so logs can be grouped afterwards.
     label: str = ""

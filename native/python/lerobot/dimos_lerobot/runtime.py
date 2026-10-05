@@ -72,11 +72,13 @@ class _ActionEnsemble:
     for a step is the weighted mean of every registered chunk's prediction for
     it, weights ``exp(-coeff * i)`` with ``i = 0`` for the oldest chunk, as in
     LeRobot's ``ACTTemporalEnsembler``. ``coeff=None`` disables averaging and
-    returns the newest chunk's prediction.
+    returns the newest chunk's prediction. ``window`` keeps only the newest
+    that many chunks.
     """
 
-    def __init__(self, coeff: float | None) -> None:
+    def __init__(self, coeff: float | None, window: int | None = None) -> None:
         self._coeff = coeff
+        self._window = window
         self._chunks: list[tuple[int, NDArray[np.float32]]] = []
 
     def add(self, step: int, chunk: NDArray[np.float32]) -> None:
@@ -85,6 +87,8 @@ class _ActionEnsemble:
             raise ValueError("chunks must be added in step order")
         self._chunks = [(start, rows) for start, rows in self._chunks if start + len(rows) > step]
         self._chunks.append((step, chunk))
+        if self._window is not None:
+            del self._chunks[: -self._window]
 
     def discard_last(self) -> None:
         if self._chunks:
@@ -520,7 +524,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
         period = 1.0 / self.config.fps
         horizon = loaded_policy.n_action_steps
         replan = self.config.replan_steps or horizon
-        ensemble = _ActionEnsemble(self.config.temporal_ensemble_coeff)
+        ensemble = _ActionEnsemble(self.config.temporal_ensemble_coeff, self.config.ensemble_window)
         gripper_index = self._gripper_index()
         arm = [i for i in range(len(self.config.joint_names)) if i != gripper_index]
         step = 0
@@ -650,6 +654,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
                 "n_action_steps": loaded.n_action_steps if loaded is not None else None,
                 "replan_steps": self.config.replan_steps,
                 "temporal_ensemble_coeff": self.config.temporal_ensemble_coeff,
+                "ensemble_window": self.config.ensemble_window,
                 "label": self.config.label,
             }
         )

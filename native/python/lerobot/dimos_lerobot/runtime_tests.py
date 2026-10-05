@@ -853,6 +853,15 @@ def test_action_ensemble_drops_expired_chunks_and_can_discard_the_last() -> None
         ensemble.add(1, _constant_chunk([0.0]))
 
 
+def test_action_ensemble_window_keeps_only_the_newest_chunks() -> None:
+    ensemble = _ActionEnsemble(coeff=0.0, window=2)
+    ensemble.add(0, _constant_chunk([0.0, 0.0, 0.0, 0.0]))
+    ensemble.add(1, _constant_chunk([4.0, 4.0, 4.0, 4.0]))
+    ensemble.add(2, _constant_chunk([8.0, 8.0, 8.0, 8.0]))
+    # The oldest chunk still covers step 2 but fell out of the window.
+    np.testing.assert_allclose(ensemble.targets(2, 1), 6.0)
+
+
 def test_action_ensemble_without_coefficient_returns_the_newest_chunk() -> None:
     ensemble = _ActionEnsemble(coeff=None)
     ensemble.add(0, _constant_chunk([0.0, 0.0, 0.0]))

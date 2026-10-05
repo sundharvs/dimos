@@ -47,7 +47,8 @@ steps (default 1; `None` means once per `n_action_steps`), postprocesses the ent
 to the checkpoint's recorded data range, and folds it into a temporal ensemble
 (ACT, Algorithm 2): each step's target is the `exp(-temporal_ensemble_coeff * i)`
 weighted mean of every chunk that predicted it, `i = 0` for the oldest (default
-coefficient 0.01, LeRobot's; `None` executes the newest chunk only). Each
+coefficient 0.01, LeRobot's; `None` executes the newest chunk only;
+`ensemble_window` caps how many of the newest chunks take part). Each
 submission carries the ensemble's next `n_action_steps` targets at the
 configured `fps` and lands while the previous trajectory is still running, so
 the coordinator continues from its commanded position instead of stopping at
