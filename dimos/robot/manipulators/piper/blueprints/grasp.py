@@ -132,8 +132,12 @@ piper_grasp = autoconnect(
         grasp_verification=GraspVerificationConfig(open_tolerance=0.2),
     ),
     # Rim pinch for containers wider than the jaws (autoresearch "pick up the
-    # yellow bin", 2026-10-04). Held-out validation through this blueprint:
-    # RIM_VALIDATION_PLACEHOLDER
+    # yellow bin", 2026-10-04). Held-out through this blueprint at 134f0399, five
+    # placements the arm had not been tuned on: the bin was held clear of the
+    # table in 5 of 5 scene-camera frames, and pick_up_by_rim reported 3 of
+    # them. Its hold check is the weak part: twice it measured a rise of -0.010
+    # and +0.020 m against the 0.02 m it needs while the bin was in the gripper.
+    # It rejected a deliberate empty grasp (1 of 1).
     RimGraspModule.blueprint(
         planning_frame="world",
         table_z=PIPER_GRASP_TABLE_Z,
