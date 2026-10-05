@@ -65,6 +65,9 @@ class ObjectSceneRegistrationConfig(ModuleConfig):
     max_distance: float = 0.0
     use_aabb: bool = False
     max_obstacle_width: float = 0.0
+    # Metres per DEPTH16 unit. Most RealSense models report millimetres; a D405
+    # reports 0.1 mm, so it needs 0.0001 or every object lands ten times too far.
+    depth_unit_m: float = 0.001
 
 
 class ObjectSceneRegistrationModule(Module):
@@ -414,7 +417,7 @@ class ObjectSceneRegistrationModule(Module):
         # Convert depth to meters (float32)
         depth_cv = depth_msg.to_opencv()
         if depth_msg.format == ImageFormat.DEPTH16:
-            depth_cv = depth_cv.astype(np.float32) / 1000.0
+            depth_cv = depth_cv.astype(np.float32) * self.config.depth_unit_m
         elif depth_cv.dtype != np.float32:
             depth_cv = depth_cv.astype(np.float32)
         depth_image = Image(

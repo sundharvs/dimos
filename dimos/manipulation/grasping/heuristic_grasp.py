@@ -22,7 +22,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from dimos.core.core import rpc
-from dimos.core.module import Module
+from dimos.core.module import Module, ModuleConfig
 from dimos.manipulation.grasping.grasp_gen_spec import GraspGenSpec
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -33,11 +33,19 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.msgs.std_msgs.Header import Header
 
 
+class HeuristicGraspModuleConfig(ModuleConfig):
+    # Added to the jaw yaw. A parallel-jaw grasp is unchanged by a half turn, so
+    # pi picks the equivalent grasp for a wrist whose range is centred there.
+    yaw_offset: float = 0.0
+
+
 class HeuristicGraspModule(Module, GraspGenSpec):
     """Generate one top-down parallel-jaw grasp from a gravity-aligned point cloud.
 
     The input frame's XY plane must be horizontal and its -Z axis must point down.
     """
+
+    config: HeuristicGraspModuleConfig
 
     @rpc
     def propose_grasps(self, object_pointcloud: PointCloud2) -> GraspCandidateArray:
@@ -56,7 +64,9 @@ class HeuristicGraspModule(Module, GraspGenSpec):
         low_z, high_z = np.quantile(points[:, 2], [0.05, 0.95])
         pose = Pose(
             Vector3(float(center_xy[0]), float(center_xy[1]), float((low_z + high_z) / 2.0)),
-            Quaternion.from_euler(Vector3(-math.pi, 0.0, self._narrow_axis_yaw(xy))),
+            Quaternion.from_euler(
+                Vector3(-math.pi, 0.0, self._narrow_axis_yaw(xy) + self.config.yaw_offset)
+            ),
         )
         return GraspCandidateArray(
             Header(float(object_pointcloud.ts), object_pointcloud.frame_id),

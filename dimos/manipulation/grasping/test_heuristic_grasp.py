@@ -88,6 +88,34 @@ def test_heuristic_grasp_aligns_jaw_axis_with_narrow_axis(module: HeuristicGrasp
     assert jaw_axis.z == pytest.approx(0.0, abs=1e-6)
 
 
+def test_heuristic_grasp_yaw_offset_turns_the_jaws_a_half_turn() -> None:
+    points = np.asarray(
+        [
+            [-0.10, -0.02, 0.10],
+            [-0.10, 0.02, 0.10],
+            [0.10, -0.02, 0.20],
+            [0.10, 0.02, 0.20],
+        ]
+    )
+    plain = HeuristicGraspModule()
+    turned = HeuristicGraspModule(yaw_offset=math.pi)
+    try:
+        plain_pose = plain.propose_grasps(_cloud(points)).candidates[0].pose
+        turned_pose = turned.propose_grasps(_cloud(points)).candidates[0].pose
+    finally:
+        plain.stop()
+        turned.stop()
+
+    assert turned_pose.position.z == pytest.approx(plain_pose.position.z)
+    plain_jaw = plain_pose.orientation.rotate_vector(Vector3(0.0, 1.0, 0.0))
+    turned_jaw = turned_pose.orientation.rotate_vector(Vector3(0.0, 1.0, 0.0))
+    # Same jaw line, opposite direction: the grasp is unchanged.
+    assert turned_jaw.x == pytest.approx(-plain_jaw.x, abs=1e-6)
+    assert turned_jaw.y == pytest.approx(-plain_jaw.y, abs=1e-6)
+    approach = turned_pose.orientation.rotate_vector(Vector3(0.0, 0.0, 1.0))
+    assert approach.z == pytest.approx(-1.0)
+
+
 def test_heuristic_grasp_canonicalizes_pca_eigenvector_sign(
     module: HeuristicGraspModule, monkeypatch: pytest.MonkeyPatch
 ) -> None:
