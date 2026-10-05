@@ -80,6 +80,13 @@ PIPER_GRASP_NEAR_MIN_Z = PIPER_GRASP_TABLE_Z + PIPER_FINGERTIPS_PAST_TCP
 # 6 cm up 0.08-0.41 m.
 PIPER_GRASP_PREGRASP_OFFSET = 0.06
 
+# Look posture for the rim grasp: the home posture carried 10 cm up and out,
+# tool about 23 cm above the table. From home the camera sees a rim 10 cm tall
+# only between about 0.20 and 0.33 m from the base, and a third of a 30 cm wall;
+# from here it found the same wall at 0.39 m with 27 cm of it in view.
+# Measured 2026-10-04.
+PIPER_RIM_LOOK_JOINTS = [0.0, 1.2785, -1.1352, 0.0, 1.0807, 0.0]
+
 # Hand-eye calibration for the eye-in-hand RealSense, measured 2026-10-02 with
 # PIPER_JOINT_OFFSETS_DEG=0,0,0,0,4.42,0: 16 poses, board-in-base spread
 # 6.9 mm / 1.36 deg RMS. Re-measure whenever the camera mount moves or the joint
@@ -133,9 +140,12 @@ piper_grasp = autoconnect(
         fingertips_past_tcp=PIPER_FINGERTIPS_PAST_TCP,
         # Straight down, the planner rejects poses more than 12 cm above the
         # table at 0.315 m from the base (JOINT_LIMITS); leaning 15 deg outward
-        # it plans from the grasp height up to 18 cm. Swept offline 2026-10-04.
+        # the grasp, pre-grasp and lift all plan for rims 0.22-0.42 m from the
+        # base. Swept offline 2026-10-04.
         lean=math.radians(15.0),
+        max_grasp_range=0.42,
         pregrasp_offset=PIPER_GRASP_PREGRASP_OFFSET,
+        look_joints=PIPER_RIM_LOOK_JOINTS,
         # Fingertips 1.7-2.5 cm below the rim of the yellow shelf bin dropped it
         # in two of three lifts; 4.5 cm held. Measured 2026-10-04.
         grasp_depth=0.045,

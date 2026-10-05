@@ -49,6 +49,7 @@ from dimos.manipulation.skill_errors import ManipulationSkillError
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.perception.experimental.object_scene_registration_spec import ObjectSceneRegistrationSpec
 
 Points = NDArray[np.float64]
@@ -67,9 +68,15 @@ class RimGraspModuleConfig(ModuleConfig):
     # Horizontal range from the planning-frame origin inside which a rim is looked for.
     max_range: float = Field(default=0.60, gt=0.0)
     # Rim candidates are straight lines through the points within rim_band of
-    # the highest raised point; the longest one is taken, so that a long wall
-    # wins over a slightly taller short one and the container hangs level.
+    # the highest raised point. Of those at least long_fraction as long as the
+    # longest, the one nearest the planning-frame origin is taken: a long wall
+    # wins over a slightly taller short one, so the container hangs level, and
+    # the near wall wins over the far one, which is the same grasp further out.
     rim_band: float = Field(default=0.025, gt=0.0)
+    long_fraction: float = Field(default=0.6, gt=0.0, le=1.0)
+    # Rims with their midpoint further than this from the origin are not grasp
+    # candidates. Rig-specific: how far out the grasp, pre-grasp and lift plan.
+    max_grasp_range: float = Field(default=0.60, gt=0.0)
     # A line's own top edge: its points within this much of its highest.
     edge_band: float = Field(default=0.015, gt=0.0)
     line_tolerance: float = Field(default=0.008, gt=0.0)
@@ -84,6 +91,13 @@ class RimGraspModuleConfig(ModuleConfig):
     lean: float = Field(default=math.radians(15.0), ge=0.0)
     pregrasp_offset: float = Field(default=0.06, gt=0.0)
     lift_height: float = Field(default=0.10, gt=0.0)
+    # Joint posture pick_up_by_rim measures from: the wrist camera looking down
+    # from high enough to see a whole wall. None measures from wherever the arm is.
+    look_joints: list[float] | None = None
+    # Two consecutive rim measurements must agree this closely before the arm
+    # goes to one: across the wall in metres, and in direction in radians.
+    rim_agreement: float = Field(default=0.01, gt=0.0)
+    yaw_agreement: float = Field(default=0.15, gt=0.0)
     # Seconds to let the camera settle after a motion before measuring.
     settle_time: float = Field(default=0.7, ge=0.0)
     # The scene module rebuilds its depth snapshot on a scan; the prompt only
@@ -91,14 +105,19 @@ class RimGraspModuleConfig(ModuleConfig):
     scan_prompt: str = "container"
     cloud_range: float = Field(default=1.0, gt=0.0)
     cloud_voxel: float = Field(default=0.003, gt=0.0)
-    # Held check after the lift: at least min_held_points depth points within
-    # hold_radius of the grasp point, between hold_below under and hold_above
-    # over where the rim now is. Nothing else is in the air there, and the
-    # camera does not see the fingers.
-    hold_radius: float = Field(default=0.10, gt=0.0)
-    hold_below: float = Field(default=0.07, gt=0.0)
+    # Held check: the lift stops check_step short, a cloud is taken, the lift
+    # is finished and a second cloud is taken. What is held rises with the
+    # gripper; what was left behind does not, wherever the camera is looking.
+    # Compared is the median height of the points within hold_radius of the
+    # grasp point that are more than hold_floor above the table and no more
+    # than hold_above over the lifted rim; it must rise by min_rise_fraction of
+    # check_step, with min_held_points such points in each cloud.
+    check_step: float = Field(default=0.04, gt=0.0)
+    hold_radius: float = Field(default=0.15, gt=0.0)
+    hold_floor: float = Field(default=0.025, gt=0.0)
     hold_above: float = Field(default=0.03, gt=0.0)
-    min_held_points: int = Field(default=20, gt=0)
+    min_rise_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
+    min_held_points: int = Field(default=50, gt=0)
     # Tries at getting a depth cloud; the first scan after start-up has no
     # camera transform yet.
     cloud_attempts: int = Field(default=3, gt=0)
@@ -122,7 +141,8 @@ class HoldEstimate:
     """What the depth cloud shows under the gripper after a lift."""
 
     held: bool
-    lifted_points: int
+    rise: float
+    points: int
 
 
 def find_rim(points: Points, config: RimGraspModuleConfig) -> RimEstimate | None:
@@ -137,7 +157,7 @@ def find_rim(points: Points, config: RimGraspModuleConfig) -> RimEstimate | None
     top = float(np.percentile(raised[:, 2], 98))
     band = raised[raised[:, 2] > top - config.rim_band]
 
-    best: RimEstimate | None = None
+    candidates: list[RimEstimate] = []
     for _ in range(3):
         if len(band) < config.min_rim_points:
             break
@@ -145,10 +165,14 @@ def find_rim(points: Points, config: RimGraspModuleConfig) -> RimEstimate | None
         if inliers is None or int(inliers.sum()) < config.min_rim_points:
             break
         rim = _rim_from_line(band[inliers], config)
-        if rim is not None and (best is None or rim.length > best.length):
-            best = rim
+        if rim is not None and math.hypot(rim.x, rim.y) <= config.max_grasp_range:
+            candidates.append(rim)
         band = band[~inliers]
-    return best
+    if not candidates:
+        return None
+    longest = max(rim.length for rim in candidates)
+    long_ones = [rim for rim in candidates if rim.length >= config.long_fraction * longest]
+    return min(long_ones, key=lambda rim: math.hypot(rim.x, rim.y))
 
 
 def _longest_line(xy: Points, tolerance: float) -> NDArray[np.bool_] | None:
@@ -194,23 +218,42 @@ def _rim_from_line(line: Points, config: RimGraspModuleConfig) -> RimEstimate | 
     )
 
 
-def check_held(
-    points: Points, x: float, y: float, rim_z: float, config: RimGraspModuleConfig
-) -> HoldEstimate:
-    """Decide from a cloud taken after the lift whether the container came up.
+def rims_agree(a: RimEstimate, b: RimEstimate, config: RimGraspModuleConfig) -> bool:
+    """Whether two measurements describe the same wall: same line, same direction."""
+    turn = (a.wall_yaw - b.wall_yaw + math.pi / 2.0) % math.pi - math.pi / 2.0
+    across = abs(-math.sin(a.wall_yaw) * (b.x - a.x) + math.cos(a.wall_yaw) * (b.y - a.y))
+    return abs(turn) < config.yaw_agreement and across < config.rim_agreement
 
-    A held wall hangs in the air around the lifted grasp point; a container
-    left behind leaves that space empty.
-    """
+
+def _raised_near(
+    points: Points, x: float, y: float, rim_z: float, config: RimGraspModuleConfig
+) -> NDArray[np.float64]:
+    """Heights of the points around the grasp point that are off the table."""
     if len(points) == 0:
-        return HoldEstimate(False, 0)
-    lifted_rim = rim_z + config.lift_height
+        return np.empty(0)
     near = np.hypot(points[:, 0] - x, points[:, 1] - y) < config.hold_radius
     z = points[near, 2]
-    lifted = int(
-        ((z > lifted_rim - config.hold_below) & (z < lifted_rim + config.hold_above)).sum()
-    )
-    return HoldEstimate(lifted >= config.min_held_points, lifted)
+    top = rim_z + config.lift_height + config.hold_above
+    raised: NDArray[np.float64] = z[(z > config.table_z + config.hold_floor) & (z < top)]
+    return raised
+
+
+def check_held(
+    before: Points, after: Points, x: float, y: float, rim_z: float, config: RimGraspModuleConfig
+) -> HoldEstimate:
+    """Decide whether the container is in the gripper from two clouds check_step apart.
+
+    ``before`` is taken check_step short of the full lift and ``after`` at it.
+    A held container rises by check_step between them; one left on the table,
+    upright or toppled, stays where it is.
+    """
+    low = _raised_near(before, x, y, rim_z, config)
+    high = _raised_near(after, x, y, rim_z, config)
+    points = min(len(low), len(high))
+    if points < config.min_held_points:
+        return HoldEstimate(False, 0.0, points)
+    rise = float(np.median(high) - np.median(low))
+    return HoldEstimate(rise >= config.min_rise_fraction * config.check_step, rise, points)
 
 
 def rim_grasp_pose(
@@ -250,10 +293,10 @@ class RimGraspModule(Module):
     def find_rim(self) -> SkillResult[ManipulationSkillError]:
         """Measure the rim of an open container under the wrist camera.
 
-        Use from a pose where the camera looks down at the container (go_home).
-        Takes the highest straight edge above the table in view; it does not
-        know what the edge belongs to. Returns x, y, rim_z and wall_yaw for
-        grasp_rim.
+        Use from a pose where the camera looks down at the container. Takes the
+        longest straight edge near the top of whatever stands on the table in
+        view; it does not know what the edge belongs to. Returns x, y, rim_z and
+        wall_yaw for grasp_rim.
         """
         rim = self._measure_rim()
         if isinstance(rim, SkillResult):
@@ -283,7 +326,7 @@ class RimGraspModule(Module):
         Use with the values from find_rim, for a wall thinner than the jaw
         opening with free space on both sides. Fails with
         GRASP_VERIFICATION_FAILED, gripper still closed and raised, when depth
-        does not show the container off the table.
+        does not show the container rising with the gripper.
 
         Args:
             x: Rim point in the planning frame, metres.
@@ -324,25 +367,36 @@ class RimGraspModule(Module):
             return failure
         if failure := self._gripper(self.config.gripper.closed_position, group):
             return failure
-        if failure := self._linear(self.config.lift_height, group, "lift"):
+        step = min(self.config.check_step, self.config.lift_height / 2.0)
+        if failure := self._linear(self.config.lift_height - step, group, "lift"):
             return failure
-
-        cloud = self._cloud()
-        if isinstance(cloud, SkillResult):
-            return SkillResult.fail(
-                "GRASP_VERIFICATION_FAILED", f"No depth after the lift: {cloud.message}"
-            )
-        hold = check_held(cloud, x, y, rim_z, self.config)
+        before = self._cloud()
+        if failure := self._linear(step, group, "lift"):
+            return failure
+        after = self._cloud()
+        for cloud in (before, after):
+            if isinstance(cloud, SkillResult):
+                return SkillResult.fail(
+                    "GRASP_VERIFICATION_FAILED", f"No depth after the lift: {cloud.message}"
+                )
+        assert not isinstance(before, SkillResult) and not isinstance(after, SkillResult)
+        hold = check_held(before, after, x, y, rim_z, self.config)
         if not hold.held:
             return SkillResult.fail(
                 "GRASP_VERIFICATION_FAILED",
-                f"Container not seen at the gripper after the lift: {hold.lifted_points} depth "
-                f"points around the lifted rim, {self.config.min_held_points} needed",
+                f"Nothing rose with the gripper over the last {step:.2f} m of the lift: "
+                f"{hold.points} raised depth points near it moved {hold.rise:+.3f} m. "
+                f"Grasped at ({x:.3f}, {y:.3f}), rim z {rim_z:.3f}, wall yaw {wall_yaw:.2f}",
             )
         self._held_at = (x, y)
         return SkillResult.ok(
             f"Container held {self.config.lift_height:.2f} m up by its rim",
-            lifted_points=hold.lifted_points,
+            rise=hold.rise,
+            points=hold.points,
+            x=x,
+            y=y,
+            rim_z=rim_z,
+            wall_yaw=wall_yaw,
         )
 
     @skill(uses=[CAP_MOVEMENT])
@@ -351,17 +405,25 @@ class RimGraspModule(Module):
     ) -> SkillResult[ManipulationSkillError]:
         """Pick up the open container under the wrist camera by one wall's rim.
 
-        Use for bins, trays and boxes too wide for the gripper, from a pose
-        where the camera looks down at one of the walls (go_home). Succeeds only
-        when depth shows the container off the table after the lift.
+        Use for bins, trays and boxes too wide for the gripper, standing in
+        front of the arm. Moves to the look posture, measures the rim, pinches
+        the wall and lifts. Succeeds only when depth shows the container rising
+        with the gripper.
 
         Args:
             planning_group: Gripper-capable pose group; omit when there is only one.
         """
+        group = self._resolve_group(planning_group)
+        if group is None:
+            return SkillResult.fail("ROBOT_NOT_FOUND", "Gripper pose group is missing or ambiguous")
+        if self._holding(group):
+            return SkillResult.fail("INVALID_STATE", "Release the held container first")
+        if failure := self._look(group):
+            return failure
         rim = self._measure_rim()
         if isinstance(rim, SkillResult):
             return rim
-        return self.grasp_rim(rim.x, rim.y, rim.rim_z, rim.wall_yaw, planning_group)
+        return self.grasp_rim(rim.x, rim.y, rim.rim_z, rim.wall_yaw, group)
 
     @skill(uses=[CAP_MOVEMENT])
     def release_rim(
@@ -399,18 +461,43 @@ class RimGraspModule(Module):
             self._held_at = None
         return self._held_at is not None
 
+    def _look(self, group: PlanningGroupID) -> SkillResult[ManipulationSkillError] | None:
+        if self.config.look_joints is None:
+            return None
+        joints = self._manipulation.get_state().groups[group].joints
+        if joints is None:
+            return SkillResult.fail("INVALID_STATE", "Joint state is unavailable")
+        target = JointState(name=list(joints.name), position=list(self.config.look_joints))
+        plan = self._manipulation.plan_to_joints({group: target})
+        if not plan.succeeded:
+            return SkillResult.fail("PLANNING_FAILED", f"look posture: {plan.message}")
+        execution = self._manipulation.execute(blocking=True)
+        if not execution.succeeded:
+            return SkillResult.fail("EXECUTION_FAILED", f"look posture: {execution.message}")
+        return None
+
     def _measure_rim(self) -> RimEstimate | SkillResult[ManipulationSkillError]:
-        cloud = self._cloud()
-        if isinstance(cloud, SkillResult):
-            return cloud
-        rim = find_rim(cloud, self.config)
-        if rim is None:
+        """Measure until two consecutive clouds give the same rim."""
+        previous: RimEstimate | None = None
+        seen = 0
+        for _ in range(self.config.cloud_attempts + 1):
+            cloud = self._cloud()
+            if isinstance(cloud, SkillResult):
+                return cloud
+            seen = len(cloud)
+            rim = find_rim(cloud, self.config)
+            if rim is not None and previous is not None and rims_agree(previous, rim, self.config):
+                return rim
+            previous = rim
+        if previous is None:
             return SkillResult.fail(
                 "OBJECT_NOT_DETECTED",
                 f"No straight edge more than {self.config.min_height:.2f} m above the table "
-                f"in {len(cloud)} depth points",
+                f"in {seen} depth points",
             )
-        return rim
+        return SkillResult.fail(
+            "PERCEPTION_FAILED", "Consecutive rim measurements disagree; the scene is not steady"
+        )
 
     def _cloud(self) -> Points | SkillResult[ManipulationSkillError]:
         failure: SkillResult[ManipulationSkillError] = SkillResult.fail(

@@ -85,9 +85,15 @@ def test_find_rim_ignores_a_bare_table_and_far_points() -> None:
 
 
 def test_check_held_tells_a_lifted_container_from_one_left_behind() -> None:
-    assert check_held(_bin_lifted(CONFIG.lift_height), 0.30, 0.0, 0.10, CONFIG).held
-    assert not check_held(_bin_on_table(), 0.30, 0.0, 0.10, CONFIG).held
-    assert not check_held(_table(), 0.30, 0.0, 0.10, CONFIG).held
+    part, full = CONFIG.lift_height - CONFIG.check_step, CONFIG.lift_height
+
+    held = check_held(_bin_lifted(part), _bin_lifted(full), 0.30, 0.0, 0.10, CONFIG)
+    assert held.held
+    assert held.rise == pytest.approx(CONFIG.check_step, abs=0.005)
+    assert not check_held(_bin_on_table(), _bin_on_table(), 0.30, 0.0, 0.10, CONFIG).held
+    assert not check_held(_table(), _table(), 0.30, 0.0, 0.10, CONFIG).held
+    # Dropped between the two looks.
+    assert not check_held(_bin_lifted(part), _bin_on_table(), 0.30, 0.0, 0.10, CONFIG).held
 
 
 def test_find_rim_prefers_a_long_wall_over_a_taller_short_one() -> None:
@@ -141,6 +147,11 @@ def module(monkeypatch: pytest.MonkeyPatch) -> Iterator[RimGraspModule]:
     instance.stop()
 
 
+def _lifted(module: RimGraspModule) -> tuple[Points, Points]:
+    lift = module.config.lift_height
+    return _bin_lifted(lift - module.config.check_step), _bin_lifted(lift)
+
+
 def _clouds(module: RimGraspModule, *clouds: Points) -> None:
     module._scene.get_full_scene_pointcloud.side_effect = [  # type: ignore[attr-defined]
         SimpleNamespace(frame_id="world", points_f32=lambda cloud=cloud: cloud) for cloud in clouds
@@ -150,18 +161,25 @@ def _clouds(module: RimGraspModule, *clouds: Points) -> None:
 def test_pick_up_by_rim_succeeds_when_depth_shows_the_container_lifted(
     module: RimGraspModule,
 ) -> None:
-    _clouds(module, _bin_on_table(), _bin_lifted(module.config.lift_height))
+    _clouds(module, _bin_on_table(), _bin_on_table(), *_lifted(module))
 
     result = module.pick_up_by_rim()
 
     assert result.success, result.message
+    assert result.metadata["x"] == pytest.approx(0.30, abs=0.005)
     moves = [call.args[2] for call in module._manipulation.move_linear.call_args_list]  # type: ignore[attr-defined]
-    assert moves == [-module.config.pregrasp_offset, module.config.lift_height]
+    assert moves == pytest.approx(
+        [
+            -module.config.pregrasp_offset,
+            module.config.lift_height - module.config.check_step,
+            module.config.check_step,
+        ]
+    )
     assert module.release_rim().success
 
 
 def test_pick_up_by_rim_reports_a_container_left_on_the_table(module: RimGraspModule) -> None:
-    _clouds(module, _bin_on_table(), _bin_on_table())
+    _clouds(module, _bin_on_table(), _bin_on_table(), _bin_on_table(), _bin_on_table())
 
     result = module.pick_up_by_rim()
 
@@ -170,7 +188,7 @@ def test_pick_up_by_rim_reports_a_container_left_on_the_table(module: RimGraspMo
 
 
 def test_pick_up_by_rim_does_not_move_without_a_rim(module: RimGraspModule) -> None:
-    _clouds(module, _table(), _table(), _table())
+    _clouds(module, _table(), _table(), _table(), _table())
 
     result = module.pick_up_by_rim()
 
@@ -186,21 +204,81 @@ def test_grasp_rim_tries_the_other_half_turn_when_the_first_is_unreachable(
         SimpleNamespace(succeeded=False, message="JOINT_LIMITS"),
         SimpleNamespace(succeeded=True, message=""),
     ]
-    _clouds(module, _bin_lifted(module.config.lift_height))
+    _clouds(module, *_lifted(module))
 
     assert module.grasp_rim(0.30, 0.0, 0.10, math.pi / 2).success
     assert module._manipulation.plan_to_poses.call_count == 2  # type: ignore[attr-defined]
 
 
 def test_a_hold_ends_when_the_jaws_are_found_open(module: RimGraspModule) -> None:
-    _clouds(module, _bin_lifted(module.config.lift_height))
+    _clouds(module, *_lifted(module))
     assert module.grasp_rim(0.30, 0.0, 0.10, math.pi / 2).success
     assert module.grasp_rim(0.30, 0.0, 0.10, math.pi / 2).error_code == "INVALID_STATE"
 
     module._manipulation.get_state.return_value = SimpleNamespace(  # type: ignore[attr-defined]
         groups={"arm/tool": SimpleNamespace(gripper_position=0.87)}
     )
-    _clouds(module, _bin_lifted(module.config.lift_height))
+    _clouds(module, *_lifted(module))
 
     assert module.release_rim().error_code == "INVALID_STATE"
     assert module.grasp_rim(0.30, 0.0, 0.10, math.pi / 2).success
+
+
+def test_pick_up_by_rim_waits_for_two_measurements_that_agree(module: RimGraspModule) -> None:
+    moved = _bin_on_table()
+    moved[:, 0] += 0.05
+    _clouds(module, moved, _bin_on_table(), _bin_on_table(), *_lifted(module))
+
+    result = module.pick_up_by_rim()
+
+    assert result.success, result.message
+    assert result.metadata["x"] == pytest.approx(0.30, abs=0.005)
+
+
+def test_pick_up_by_rim_refuses_a_scene_that_keeps_changing(module: RimGraspModule) -> None:
+    clouds = []
+    for step in range(4):
+        cloud = _bin_on_table()
+        cloud[:, 0] += 0.03 * step
+        clouds.append(cloud)
+    _clouds(module, *clouds)
+
+    result = module.pick_up_by_rim()
+
+    assert result.error_code == "PERCEPTION_FAILED"
+    module._manipulation.set_gripper_position.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_pick_up_by_rim_goes_to_the_look_posture_first(module: RimGraspModule) -> None:
+    module.config.look_joints = [0.0, 1.0, -1.0, 0.0, 1.0, 0.0]
+    module._manipulation.get_state.return_value = SimpleNamespace(  # type: ignore[attr-defined]
+        groups={
+            "arm/tool": SimpleNamespace(
+                gripper_position=0.0,
+                joints=SimpleNamespace(name=["j1", "j2", "j3", "j4", "j5", "j6"]),
+            )
+        }
+    )
+    module._manipulation.plan_to_joints.return_value = SimpleNamespace(  # type: ignore[attr-defined]
+        succeeded=False, message="unreachable"
+    )
+
+    result = module.pick_up_by_rim()
+
+    assert result.error_code == "PLANNING_FAILED"
+    module._scene.scan_scene.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_find_rim_takes_the_near_wall_of_two_long_ones() -> None:
+    far_wall = _wall(0.42, -0.10, 0.12, 0.0, 0.10)
+
+    rim = find_rim(np.vstack([_bin_on_table(), far_wall]), CONFIG)
+
+    assert rim is not None
+    assert rim.x == pytest.approx(0.30, abs=0.005)
+
+
+def test_find_rim_drops_walls_beyond_grasp_range() -> None:
+    config = RimGraspModuleConfig(max_grasp_range=0.25)
+
+    assert find_rim(_bin_on_table(), config) is None
