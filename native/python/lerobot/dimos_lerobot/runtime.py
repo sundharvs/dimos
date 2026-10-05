@@ -650,6 +650,7 @@ class LeRobotPolicyRuntime(LeRobotPolicyModule):
                 "n_action_steps": loaded.n_action_steps if loaded is not None else None,
                 "replan_steps": self.config.replan_steps,
                 "temporal_ensemble_coeff": self.config.temporal_ensemble_coeff,
+                "label": self.config.label,
             }
         )
         self._log = log

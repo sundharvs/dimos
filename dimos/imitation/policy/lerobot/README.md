@@ -85,6 +85,14 @@ python -m dimos.imitation.policy.lerobot.tool_plot_rollout            # newest l
 python -m dimos.imitation.policy.lerobot.tool_plot_rollout LOG --show --t0 5 --t1 20
 ```
 
+`label` is a free-text tag written to the header; the xArm grasp blueprint
+writes its `XARM_GRASP_POLICY_MODE` there. Score a set of logs by smoothness
+and progress, grouped by that label, with:
+
+```bash
+python -m dimos.imitation.policy.lerobot.tool_compare_rollouts --since 19:30
+```
+
 Run isolated runtime checks with:
 
 ```bash

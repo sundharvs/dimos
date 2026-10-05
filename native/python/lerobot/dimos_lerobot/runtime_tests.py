@@ -337,6 +337,7 @@ def test_rollout_writes_a_jsonl_log_of_chunks_and_joint_states(
     assert chunk["sent"] == chunk["chunk"][:2]
     assert chunk["result"] == "ACCEPTED"
     assert records[0]["replan_steps"] == 1
+    assert records[0]["label"] == ""
     assert records[0]["temporal_ensemble_coeff"] == pytest.approx(0.01)
     assert kinds[-1] == "end"
 

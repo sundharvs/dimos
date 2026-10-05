@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import os
+from typing import Any
 
 from dimos.constants import RECORDINGS_DIR
 from dimos.control.coordinator import TaskConfig
@@ -465,15 +466,39 @@ XARM_GRASP_POLICY_PATH = os.environ.get(
     "XARM_GRASP_POLICY", "outputs/act_xarm7_grasp/checkpoints/last/pretrained_model"
 )
 XARM_GRASP_POLICY_JOINTS = [f"joint{i}" for i in range(1, 8)] + ["arm/gripper"]
-# XARM_GRASP_POLICY_CHUNKED=1 runs the checkpoint the pre-ensembling way for an
-# A/B: one prediction per n_action_steps, newest chunk only. Unset, inference
-# runs every step with temporal ensembling (the module defaults).
-XARM_GRASP_POLICY_CHUNKED = os.environ.get("XARM_GRASP_POLICY_CHUNKED", "").lower() not in (
-    "",
-    "0",
-    "false",
-    "no",
-)
+# XARM_GRASP_POLICY_MODE picks how the checkpoint's chunks are executed, for
+# the smoothing study: every mode is a preset of LeRobotPolicyModule settings
+# and is written to the rollout log header as ``label`` so
+# tool_compare_rollouts can group the logs. ``XARM_GRASP_POLICY_CHUNKED=1`` is
+# the old spelling of ``chunked``.
+XARM_GRASP_POLICY_MODES: dict[str, dict[str, Any]] = {
+    # One prediction per n_action_steps, newest chunk only: the pre-ensembling
+    # execution, with its first-step jump at every chunk boundary.
+    "chunked": {"replan_steps": None, "temporal_ensemble_coeff": None},
+    # Inference every step, every overlapping chunk averaged (ACT Algorithm 2,
+    # oldest weighted most): smooth, but the averaging erases the chunks'
+    # first-step jump and the arm moves at half speed.
+    "ensemble": {"replan_steps": 1, "temporal_ensemble_coeff": 0.01},
+    # Inference every step, newest chunk only: the arm chases the policy's
+    # latest intent continuously, LeRobot's n_action_steps=1 deployment.
+    "newest": {"replan_steps": 1, "temporal_ensemble_coeff": None},
+}
+_DEFAULT_POLICY_MODE = "ensemble"
+
+
+def _policy_mode() -> str:
+    mode = os.environ.get("XARM_GRASP_POLICY_MODE", "").strip().lower()
+    if not mode:
+        chunked = os.environ.get("XARM_GRASP_POLICY_CHUNKED", "").lower()
+        mode = "chunked" if chunked not in ("", "0", "false", "no") else _DEFAULT_POLICY_MODE
+    if mode not in XARM_GRASP_POLICY_MODES:
+        raise ValueError(
+            f"XARM_GRASP_POLICY_MODE={mode!r} is not one of {sorted(XARM_GRASP_POLICY_MODES)}"
+        )
+    return mode
+
+
+XARM_GRASP_POLICY_MODE = _policy_mode()
 
 xarm_grasp_keyboard_policy = autoconnect(
     *_XARM_GRASP_KEYBOARD_MODULES,
@@ -484,8 +509,8 @@ xarm_grasp_keyboard_policy = autoconnect(
         joint_names=XARM_GRASP_POLICY_JOINTS,
         # Dataset rate: the policy's n_action_steps are executed at this rate.
         fps=15.0,
-        replan_steps=None if XARM_GRASP_POLICY_CHUNKED else 1,
-        temporal_ensemble_coeff=None if XARM_GRASP_POLICY_CHUNKED else 0.01,
+        label=XARM_GRASP_POLICY_MODE,
+        **XARM_GRASP_POLICY_MODES[XARM_GRASP_POLICY_MODE],
         robot_type="xarm7",
         image_width=848,
         image_height=480,

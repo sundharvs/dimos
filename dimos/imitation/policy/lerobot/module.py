@@ -105,6 +105,9 @@ class LeRobotPolicyModuleConfig(IsolatedPythonModuleConfig):
     # exp(-coeff * i)-weighted mean of all chunks that predicted it, i = 0 for
     # the oldest. 0 weighs them uniformly, None executes the newest chunk only.
     temporal_ensemble_coeff: float | None = 0.01
+    # Free-text tag written to every rollout log header, e.g. the execution
+    # mode under study, so logs can be grouped afterwards.
+    label: str = ""
     # Directory for per-rollout JSONL logs (every predicted action chunk plus the
     # live joint states), plotted by ``tool_plot_rollout.py``. None disables.
     rollout_log_dir: str | None = str(STATE_DIR / "policy_rollouts")
