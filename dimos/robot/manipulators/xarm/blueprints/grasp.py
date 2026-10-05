@@ -493,6 +493,10 @@ XARM_GRASP_POLICY_MODES: dict[str, dict[str, Any]] = {
     # capped at a demo-like 0.2 rad/s: the 1 Hz lunge becomes a short ramp and
     # the chunk interior, which carries the intent, runs as predicted.
     "ramp": {"replan_steps": None, "temporal_ensemble_coeff": None, "first_step_speed": 0.2},
+    # Chunked execution with the outgoing chunk's tail averaged into the new
+    # chunk's head (uniform, newest two chunks): a crossfade at every
+    # boundary, no first-step jump, and no per-step querying of the policy.
+    "crossfade": {"replan_steps": None, "temporal_ensemble_coeff": 0.0, "ensemble_window": 2},
 }
 _DEFAULT_POLICY_MODE = "ensemble"
 
