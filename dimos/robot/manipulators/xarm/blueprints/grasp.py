@@ -485,6 +485,10 @@ XARM_GRASP_POLICY_MODES: dict[str, dict[str, Any]] = {
     # Inference every step, uniform average of the newest 5 chunks only: the
     # smoothing of an ensemble with a third of a second of lag instead of three.
     "ensemble-recent": {"replan_steps": 1, "temporal_ensemble_coeff": 0.0, "ensemble_window": 5},
+    # Inference every step, every overlapping chunk averaged but the newest
+    # weighted most (exp(0.3 * age) falls to 5% after ten chunks): keeps the
+    # smoothing while the arm tracks the latest prediction within a few steps.
+    "ensemble-new": {"replan_steps": 1, "temporal_ensemble_coeff": -0.3},
 }
 _DEFAULT_POLICY_MODE = "ensemble"
 
