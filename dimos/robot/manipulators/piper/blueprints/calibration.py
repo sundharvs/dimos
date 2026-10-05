@@ -20,7 +20,8 @@ Fix a ChArUco board flat on the table, jog the arm with the Keyboard Teleop
 window, and capture in the Hand-eye calibration window. The result is the
 link6 -> camera_link edge that PIPER_WRIST_CAMERA_TRANSFORM in grasp.py holds.
 Set PIPER_JUDGE_CAN and PIPER_JOINT_OFFSETS_DEG as for piper-grasp: the edge is
-only valid with the joint offsets it was measured under.
+only valid with the joint offsets it was measured under. Set
+PIPER_WRIST_CAMERA_SERIAL when a second RealSense is connected.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from dimos.robot.manipulators.piper.config import (
     make_piper_model_config,
     piper_hardware,
     piper_joint_offsets_from_env,
+    piper_wrist_camera_serial_from_env,
 )
 from dimos.teleop.keyboard.keyboard_teleop_module import KeyboardTeleopModule
 
@@ -78,6 +80,8 @@ piper_hand_eye_calibration = autoconnect(
     ),
     ManipulationModule.blueprint(model=_model),
     # Corner error is in pixels, so calibrate at the highest colour resolution.
-    RealSenseCamera.blueprint(width=1280, height=720),
+    RealSenseCamera.blueprint(
+        width=1280, height=720, serial_number=piper_wrist_camera_serial_from_env()
+    ),
     HandEyeCalibrationModule.blueprint(base_frame="world", gripper_frame="link6"),
 )

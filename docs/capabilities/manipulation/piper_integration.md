@@ -162,8 +162,13 @@ planner, `ManipulationSkills`, `PickAndPlaceModule`, scene registration with
 moondream + EdgeTAM, and the heuristic grasp provider.
 
 ```bash
-PIPER_JUDGE_CAN=0 PIPER_JOINT_OFFSETS_DEG=0,0,0,0,4.42,0 dimos --can-port can0 run piper-grasp
+PIPER_JUDGE_CAN=0 PIPER_JOINT_OFFSETS_DEG=0,0,0,0,4.42,0 \
+  PIPER_WRIST_CAMERA_SERIAL=<D405 serial> dimos --can-port can0 run piper-grasp
 ```
+
+`PIPER_WRIST_CAMERA_SERIAL` matters when a second RealSense (a scene camera) is
+connected: without it the driver opens whichever it finds first. The serial is
+in the camera's `/dev/v4l/by-id` name.
 
 What is particular to this arm:
 

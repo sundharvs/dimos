@@ -23,7 +23,9 @@ native cargo build this rig has not had, so the planner knows only the robot.
 
 Set PIPER_JUDGE_CAN=0 for a slcan adapter and PIPER_JOINT_OFFSETS_DEG as for the
 other Piper blueprints; the camera edge below was calibrated with the joint
-offsets applied.
+offsets applied. With a second RealSense connected (a scene camera), set
+PIPER_WRIST_CAMERA_SERIAL to the wrist camera's serial number, or the driver may
+open the other one.
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ from dimos.robot.manipulators.piper.config import (
     make_piper_model_config,
     piper_hardware,
     piper_joint_offsets_from_env,
+    piper_wrist_camera_serial_from_env,
 )
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 
@@ -123,7 +126,9 @@ piper_grasp = autoconnect(
     # Top-down with yaw 0 needs joint 6 at +-180 deg, past its +-120 deg range.
     HeuristicGraspModule.blueprint(yaw_offset=math.pi),
     # enable_pointcloud is off by default.
-    RealSenseCamera.blueprint(enable_pointcloud=True),
+    RealSenseCamera.blueprint(
+        enable_pointcloud=True, serial_number=piper_wrist_camera_serial_from_env()
+    ),
     ObjectSceneRegistrationModule.blueprint(
         target_frame="world",
         detector_backend="moondream",
