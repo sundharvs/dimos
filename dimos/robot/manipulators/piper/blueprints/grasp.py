@@ -41,6 +41,7 @@ from dimos.manipulation.grasping.heuristic_grasp import HeuristicGraspModule
 from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.manipulation.manipulation_skills import ManipulationSkills
 from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
+from dimos.manipulation.rim_grasp_module import RimGraspModule
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
@@ -122,6 +123,23 @@ piper_grasp = autoconnect(
         # Commanded fully open (0.08 m) the Piper's jaws stop at 0.84, about
         # 67 mm, which the default 0.15 tolerance just rejects.
         grasp_verification=GraspVerificationConfig(open_tolerance=0.2),
+    ),
+    # Rim pinch for containers wider than the jaws (autoresearch "pick up the
+    # yellow bin", 2026-10-04). Held-out validation through this blueprint:
+    # RIM_VALIDATION_PLACEHOLDER
+    RimGraspModule.blueprint(
+        planning_frame="world",
+        table_z=PIPER_GRASP_TABLE_Z,
+        fingertips_past_tcp=PIPER_FINGERTIPS_PAST_TCP,
+        # Straight down, the planner rejects poses more than 12 cm above the
+        # table at 0.315 m from the base (JOINT_LIMITS); leaning 15 deg outward
+        # it plans from the grasp height up to 18 cm. Swept offline 2026-10-04.
+        lean=math.radians(15.0),
+        pregrasp_offset=PIPER_GRASP_PREGRASP_OFFSET,
+        # Fingertips 1.7-2.5 cm below the rim of the yellow shelf bin dropped it
+        # in two of three lifts; 4.5 cm held. Measured 2026-10-04.
+        grasp_depth=0.045,
+        gripper=GraspVerificationConfig(open_tolerance=0.2),
     ),
     # Top-down with yaw 0 needs joint 6 at +-180 deg, past its +-120 deg range.
     HeuristicGraspModule.blueprint(yaw_offset=math.pi),
