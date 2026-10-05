@@ -197,7 +197,8 @@ def make_runtime(mocker: pytest_mock.MockerFixture) -> Iterator[RuntimeFactory]:
             robot_type="test_arm",
             image_width=5,
             image_height=4,
-            **config,
+            # Never write fake rollouts into the user's real log directory.
+            **{"rollout_log_dir": None, **config},
         )
         control = mocker.MagicMock()
         control.execute_trajectory.return_value = TrajectoryExecutionResult(
