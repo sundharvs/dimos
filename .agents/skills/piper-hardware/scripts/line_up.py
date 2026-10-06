@@ -205,10 +205,13 @@ def _is_flipped(blob_ref: Blob, blob_live: Blob, turn_deg: float) -> bool:
 
 
 def compare(
-    reference: Image, live: Image, hsv_range: tuple[int, ...]
+    reference: Image,
+    live: Image,
+    hsv_range: tuple[int, ...],
+    live_hsv_range: tuple[int, ...] | None = None,
 ) -> tuple[Comparison, Blob | None, Blob | None]:
     blob_ref = find_object(reference, hsv_range)
-    blob_live = find_object(live, hsv_range)
+    blob_live = find_object(live, live_hsv_range or hsv_range)
     camera = background_motion(
         reference,
         live,
@@ -364,6 +367,11 @@ def main() -> None:
         help="object colour as lo_h,lo_s,lo_v,hi_h,hi_s,hi_v in OpenCV HSV",
     )
     parser.add_argument(
+        "--live-hsv",
+        help="the object's colour in the live view, when the lighting differs from the "
+        "reference's (default: --hsv)",
+    )
+    parser.add_argument(
         "--teleop",
         action="store_true",
         help=f"start {TELEOP_BLUEPRINT} alongside to jog the arm from the keyboard",
@@ -381,6 +389,9 @@ def main() -> None:
     hsv_range = tuple(int(v) for v in args.hsv.split(","))
     if len(hsv_range) != 6:
         raise SystemExit("--hsv needs six comma-separated values")
+    live_hsv_range = tuple(int(v) for v in args.live_hsv.split(",")) if args.live_hsv else None
+    if live_hsv_range is not None and len(live_hsv_range) != 6:
+        raise SystemExit("--live-hsv needs six comma-separated values")
 
     if args.image is not None:
         still = cv2.imread(str(args.image), cv2.IMREAD_COLOR)
@@ -399,7 +410,7 @@ def main() -> None:
     try:
         if args.once is not None:
             live = frame()
-            comparison, blob_ref, blob_live = compare(reference, live, hsv_range)
+            comparison, blob_ref, blob_live = compare(reference, live, hsv_range, live_hsv_range)
             print("\n".join(advice(comparison)))
             cv2.imwrite(str(args.once), draw(reference, live, comparison, blob_ref, blob_live))
             print(f"overlay: {args.once}")
@@ -410,7 +421,7 @@ def main() -> None:
         window = f"line up with {args.reference.name}"
         while True:
             live = frame()
-            comparison, blob_ref, blob_live = compare(reference, live, hsv_range)
+            comparison, blob_ref, blob_live = compare(reference, live, hsv_range, live_hsv_range)
             canvas = draw(reference, live, comparison, blob_ref, blob_live, views[view])
             cv2.imshow(window, canvas)
             key = cv2.waitKey(30) & 0xFF
