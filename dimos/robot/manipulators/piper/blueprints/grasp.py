@@ -22,7 +22,8 @@ Scene registration finds prompted objects by name, moondream boxes refined into
 masks by EdgeTAM, and the heuristic provider grasps them straight down. Both
 models want a GPU. Set PIPER_JUDGE_CAN and PIPER_JOINT_OFFSETS_DEG as for the
 other Piper blueprints; the camera edge below was calibrated with the joint
-offsets applied.
+offsets applied. With a second RealSense attached, set PIPER_WRIST_CAMERA_SERIAL
+to the wrist camera's serial number, or the stack may open the other one.
 
 Poses are planned to the tool frame between the jaws, so a ``place_at`` height
 is where the grasp point ends up; leave z out to set an object back down on the
@@ -77,17 +78,25 @@ PIPER_GRASP_TABLE_Z = -0.011
 # fingers still clear an object up to about 7 cm tall on the way in.
 PIPER_GRASP_PREGRASP_OFFSET = 0.06
 
-# piper-hand-eye-calibration, 2026-10-02, with PIPER_JOINT_OFFSETS_DEG=0,0,0,0,4.42,0:
-# 16 poses, board-in-base spread 6.9 mm / 1.36 deg RMS. Re-measure whenever the
-# camera mount moves or the joint offsets change.
+# piper-hand-eye-calibration, 2026-10-02, with PIPER_JOINT_OFFSETS_DEG=0,0,0,0,4.42,0,
+# then refined against three objects left where they were and seen from 28
+# poses with the wrist rolled and pitched, last on 2026-10-03 15:35: the views
+# disagreed about where one object was by 5.6 mm RMS before and 2.2 mm after.
+# The camera turns on its mount when the arm is knocked or handled, by 2 to 3
+# degrees each of the three times it was measured that day, which puts an
+# object 1 to 2 cm off depending on where in the image it is. Park the arm
+# before stopping the stack, and re-measure whenever views stop agreeing, the
+# mount is touched, or the joint offsets change.
 PIPER_WRIST_CAMERA_TRANSFORM = Transform(
-    translation=Vector3(x=-0.13631749, y=0.00055216, z=0.08518030),
-    rotation=Quaternion(-0.00054318, -0.50776572, 0.06781325, 0.85882189),  # xyzw
+    translation=Vector3(x=-0.12844295, y=0.01598712, z=0.09041254),
+    rotation=Quaternion(-0.01760351, -0.51145408, 0.02674281, 0.85871396),  # xyzw
     frame_id="link6",
     child_frame_id="camera_link",
 )
 
 _JUDGE_CAN = os.getenv("PIPER_JUDGE_CAN", "1").strip().lower() not in ("0", "false", "no", "off")
+# None lets librealsense take the first camera it enumerates.
+PIPER_WRIST_CAMERA_SERIAL = os.getenv("PIPER_WRIST_CAMERA_SERIAL", "").strip() or None
 _hardware = piper_hardware(
     "arm",
     mock_without_address=False,
@@ -129,7 +138,7 @@ piper_grasp = autoconnect(
         # Top-down with yaw 0 needs joint 6 at +-180 deg, past its +-120 deg range.
         yaw_offset=math.pi,
     ),
-    RealSenseCamera.blueprint(enable_pointcloud=True),
+    RealSenseCamera.blueprint(enable_pointcloud=True, serial_number=PIPER_WRIST_CAMERA_SERIAL),
     ObjectSceneRegistrationModule.blueprint(
         target_frame="world",
         detector_backend="moondream",
