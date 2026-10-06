@@ -54,7 +54,8 @@ ENABLE_RETRY_COUNT = 50
 ENABLE_RETRY_INTERVAL = 0.01
 
 # Default configurable parameters
-DEFAULT_GRIPPER_SPEED = 1000
+# The jaws' torque limit in mN.m, which piper_sdk takes up to 5000.
+DEFAULT_GRIPPER_EFFORT = 1000
 GRIPPER_DISABLE_CODE = 0x02  # disable and clear errors
 GRIPPER_PLAIN_DISABLE_CODE = 0x00
 GRIPPER_ENABLE_CODE = 0x01
@@ -79,7 +80,7 @@ class PiperAdapter(ManipulatorAdapter):
         self,
         address: str = "can0",
         dof: int = 6,
-        gripper_speed: int = DEFAULT_GRIPPER_SPEED,
+        gripper_effort: int = DEFAULT_GRIPPER_EFFORT,
         judge_can: bool = True,
         joint_offsets: list[float] | None = None,
         **_: object,
@@ -101,7 +102,7 @@ class PiperAdapter(ManipulatorAdapter):
         self._dof = dof
         self._arm_dof = 6
         self._gripper_dof = dof - self._arm_dof
-        self._gripper_speed = gripper_speed
+        self._gripper_effort = gripper_effort
         self._sdk: C_PiperInterface_V2 | None = None
         self._connected: bool = False
         self._enabled: bool = False
@@ -194,9 +195,9 @@ class PiperAdapter(ManipulatorAdapter):
                 # The gripper only latches an enable on a disable -> enable
                 # transition; a steady 0x01 after 0x02 (disable + clear
                 # error, sent at disconnect) leaves it disabled.
-                sdk.GripperCtrl(0, DEFAULT_GRIPPER_SPEED, GRIPPER_PLAIN_DISABLE_CODE, 0)
+                sdk.GripperCtrl(0, DEFAULT_GRIPPER_EFFORT, GRIPPER_PLAIN_DISABLE_CODE, 0)
                 time.sleep(GRIPPER_ENABLE_EDGE_WAIT)
-                sdk.GripperCtrl(0, DEFAULT_GRIPPER_SPEED, GRIPPER_ENABLE_CODE, 0)
+                sdk.GripperCtrl(0, DEFAULT_GRIPPER_EFFORT, GRIPPER_ENABLE_CODE, 0)
                 self._gripper_initialized = True
             except Exception:
                 logger.warning("Piper gripper startup command failed; continuing arm startup")
@@ -565,9 +566,9 @@ class PiperAdapter(ManipulatorAdapter):
         if self._sdk is None:
             return False
         try:
-            self._sdk.GripperCtrl(0, self._gripper_speed, GRIPPER_PLAIN_DISABLE_CODE, 0)
+            self._sdk.GripperCtrl(0, self._gripper_effort, GRIPPER_PLAIN_DISABLE_CODE, 0)
             time.sleep(GRIPPER_ENABLE_EDGE_WAIT)
-            self._sdk.GripperCtrl(0, self._gripper_speed, GRIPPER_ENABLE_CODE, 0)
+            self._sdk.GripperCtrl(0, self._gripper_effort, GRIPPER_ENABLE_CODE, 0)
             self._gripper_initialized = True
             return True
         except Exception:
@@ -579,7 +580,7 @@ class PiperAdapter(ManipulatorAdapter):
         if self._sdk is None:
             return True
         try:
-            self._sdk.GripperCtrl(0, self._gripper_speed, GRIPPER_DISABLE_CODE, 0)
+            self._sdk.GripperCtrl(0, self._gripper_effort, GRIPPER_DISABLE_CODE, 0)
             return True
         except Exception:
             logger.exception("Failed to deactivate Piper gripper")
@@ -699,7 +700,7 @@ class PiperAdapter(ManipulatorAdapter):
             gripper_position = round(
                 max(0.0, min(GRIPPER_MAX_OPENING_M, position)) * GRIPPER_STROKE_UNITS_PER_M
             )
-            self._sdk.GripperCtrl(gripper_position, self._gripper_speed, GRIPPER_ENABLE_CODE, 0)
+            self._sdk.GripperCtrl(gripper_position, self._gripper_effort, GRIPPER_ENABLE_CODE, 0)
             return True
         except Exception:
             pass
